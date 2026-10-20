@@ -1,8 +1,7 @@
 """本地 SAS 数据集读取核心。
 
-改编自 sassoftware/sas-mcp-server（Apache-2.0）：原版通过 SAS Viya REST API
-访问 CAS 数据，本模块把数据源换成本地文件——用 pyreadstat 直接读取
-.sas7bdat / .xpt，无需 SAS 许可；pyreadstat 不可用时回退 pandas.read_sas。
+用 pyreadstat 直接读取本地 .sas7bdat / .xpt 文件，无需 SAS 许可；
+pyreadstat 不可用时回退 pandas.read_sas。
 """
 
 from __future__ import annotations

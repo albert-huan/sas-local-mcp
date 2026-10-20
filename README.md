@@ -2,9 +2,9 @@
 
 一个让大模型（LLM）直接读取**本地 SAS 数据集**的 MCP 服务器。
 
-改编自 [sassoftware/sas-mcp-server](https://github.com/sassoftware/sas-mcp-server)（Apache-2.0）：保留其
-[FastMCP](https://github.com/jlowin/fastmcp) 架构与 `register(mcp, ...)` 工具注册模式，但把数据源从 SAS Viya 平台
-换成本地文件——经 [pyreadstat](https://github.com/Roche/pyreadstat) 直接读取，**无需 Viya、无需联网、无需 SAS 授权**。
+基于 [FastMCP](https://github.com/jlowin/fastmcp) 实现，经
+[pyreadstat](https://github.com/Roche/pyreadstat) 直接读取本地 `.sas7bdat` / `.xpt` 文件，
+**无需 Viya、无需联网、无需 SAS 授权**。
 
 适合的场景：
 
@@ -234,7 +234,7 @@ pytest
 
 `tests/` 下的测试数据取自 R Consortium 的 submissions-pilot5 公开示例提交包：
 
-- 上游仓库：<https://github.com/RConsortium/submissions-pilot5-datasetjson>
+- 来源仓库：<https://github.com/RConsortium/submissions-pilot5-datasetjson>
 - 取用目录：
   - [`original-sdtmdata/`](https://github.com/RConsortium/submissions-pilot5-datasetjson/tree/main/original-sdtmdata)
     — SDTM 域的 XPORT（V5）文件，22 个（`ae` / `cm` / `dm` / `lb` / `qs` / `supplb` ...）
@@ -245,7 +245,7 @@ pytest
 
 | 目录 | 内容 | 说明 |
 | --- | --- | --- |
-| `tests/xpt/` | 原始 XPORT 文件 | 上游两个 `original-*data/` 目录直接拷贝；源带 Windows-1252 字节（如 `ts.xpt`） |
+| `tests/xpt/` | 原始 XPORT 文件 | 上述两个 `original-*data/` 目录直接拷贝；源带 Windows-1252 字节（如 `ts.xpt`） |
 | `tests/sasdata/` | UTF-8 编码的 sas7bdat | 由 `tests/xpt2sas7bdat.sas` 转换 |
 | `tests/sasdata_cn/` | EUC-CN（GBK）编码的 sas7bdat | 同上，用于中文 / 非 UTF-8 编码回归 |
 
@@ -277,249 +277,249 @@ python tests/random_smoke.py --seed 20261020 --per-category 3 --out README.md
 
 | 类别 | 文件 | 大小 | 行数 × 列数 | 工具调用（通过/总数） | 耗时 |
 | --- | --- | --- | --- | --- | --- |
-| `sasdata/adam` | `sasdata/adam/adsl.sas7bdat` | 192.0 KB | 254 × 49 | 8/8 | 752 ms |
-| `sasdata/adam` | `sasdata/adam/adlbcpv.sas7bdat` | 16.0 MB | 37132 × 46 | 8/8 | 687 ms |
-| `sasdata/adam` | `sasdata/adam/adlbhpv.sas7bdat` | 11.2 MB | 24966 × 46 | 8/8 | 838 ms |
-| `sasdata/sdtm` | `sasdata/sdtm/sc.sas7bdat` | 128.0 KB | 254 × 14 | 8/8 | 403 ms |
-| `sasdata/sdtm` | `sasdata/sdtm/supplb.sas7bdat` | 54.6 MB | 64403 × 10 | 8/8 | 846 ms |
-| `sasdata/sdtm` | `sasdata/sdtm/sv.sas7bdat` | 384.0 KB | 3559 × 8 | 8/8 | 400 ms |
-| `sasdata_cn/adam` | `sasdata_cn/adam/adsl.sas7bdat` | 192.0 KB | 254 × 49 | 8/8 | 457 ms |
-| `sasdata_cn/adam` | `sasdata_cn/adam/adlbcpv.sas7bdat` | 16.0 MB | 37132 × 46 | 8/8 | 857 ms |
-| `sasdata_cn/adam` | `sasdata_cn/adam/adlbh.sas7bdat` | 9.9 MB | 24966 × 46 | 8/8 | 1006 ms |
-| `sasdata_cn/sdtm` | `sasdata_cn/sdtm/sc.sas7bdat` | 128.0 KB | 254 × 14 | 8/8 | 488 ms |
-| `sasdata_cn/sdtm` | `sasdata_cn/sdtm/supplb.sas7bdat` | 54.6 MB | 64403 × 10 | 8/8 | 936 ms |
-| `sasdata_cn/sdtm` | `sasdata_cn/sdtm/ts.sas7bdat` | 128.0 KB | 33 × 6 | 8/8 | 417 ms |
-| `xpt/adam` | `xpt/adam/adtte.xpt` | 71.8 KB | 254 × 26 | 8/8 | 424 ms |
-| `xpt/adam` | `xpt/adam/adlbcpv.xpt` | 15.8 MB | 37132 × 46 | 8/8 | 1138 ms |
-| `xpt/adam` | `xpt/adam/adcibc.xpt` | 283.7 KB | 730 × 36 | 8/8 | 419 ms |
-| `xpt/sdtm` | `xpt/sdtm/suppds.xpt` | 4.8 KB | 3 × 10 | 8/8 | 528 ms |
-| `xpt/sdtm` | `xpt/sdtm/supplb.xpt` | 54.1 MB | 64403 × 10 | 8/8 | 2048 ms |
-| `xpt/sdtm` | `xpt/sdtm/cm.xpt` | 3.6 MB | 7510 × 21 | 8/8 | 698 ms |
+| `sasdata/adam` | `sasdata/adam/adsl.sas7bdat` | 192.0 KB | 254 × 49 | 8/8 | 1173 ms |
+| `sasdata/adam` | `sasdata/adam/adlbcpv.sas7bdat` | 16.0 MB | 37132 × 46 | 8/8 | 819 ms |
+| `sasdata/adam` | `sasdata/adam/adlbhpv.sas7bdat` | 11.2 MB | 24966 × 46 | 8/8 | 863 ms |
+| `sasdata/sdtm` | `sasdata/sdtm/sc.sas7bdat` | 128.0 KB | 254 × 14 | 8/8 | 407 ms |
+| `sasdata/sdtm` | `sasdata/sdtm/supplb.sas7bdat` | 54.6 MB | 64403 × 10 | 8/8 | 771 ms |
+| `sasdata/sdtm` | `sasdata/sdtm/sv.sas7bdat` | 384.0 KB | 3559 × 8 | 8/8 | 406 ms |
+| `sasdata_cn/adam` | `sasdata_cn/adam/adsl.sas7bdat` | 192.0 KB | 254 × 49 | 8/8 | 362 ms |
+| `sasdata_cn/adam` | `sasdata_cn/adam/adlbcpv.sas7bdat` | 16.0 MB | 37132 × 46 | 8/8 | 862 ms |
+| `sasdata_cn/adam` | `sasdata_cn/adam/adlbh.sas7bdat` | 9.9 MB | 24966 × 46 | 8/8 | 1005 ms |
+| `sasdata_cn/sdtm` | `sasdata_cn/sdtm/sc.sas7bdat` | 128.0 KB | 254 × 14 | 8/8 | 396 ms |
+| `sasdata_cn/sdtm` | `sasdata_cn/sdtm/supplb.sas7bdat` | 54.6 MB | 64403 × 10 | 8/8 | 939 ms |
+| `sasdata_cn/sdtm` | `sasdata_cn/sdtm/ts.sas7bdat` | 128.0 KB | 33 × 6 | 8/8 | 389 ms |
+| `xpt/adam` | `xpt/adam/adtte.xpt` | 71.8 KB | 254 × 26 | 8/8 | 576 ms |
+| `xpt/adam` | `xpt/adam/adlbcpv.xpt` | 15.8 MB | 37132 × 46 | 8/8 | 1265 ms |
+| `xpt/adam` | `xpt/adam/adcibc.xpt` | 283.7 KB | 730 × 36 | 8/8 | 551 ms |
+| `xpt/sdtm` | `xpt/sdtm/suppds.xpt` | 4.8 KB | 3 × 10 | 8/8 | 434 ms |
+| `xpt/sdtm` | `xpt/sdtm/supplb.xpt` | 54.1 MB | 64403 × 10 | 8/8 | 1441 ms |
+| `xpt/sdtm` | `xpt/sdtm/cm.xpt` | 3.6 MB | 7510 × 21 | 8/8 | 458 ms |
 
 <details>
 <summary>逐条调用明细</summary>
 
 **`sasdata/adam/adsl.sas7bdat`**（`sasdata/adam`，192.0 KB）
 
-- [PASS] `list_datasets` 348 ms — pattern='ads' 命中 3 个
-- [PASS] `get_dataset_metadata` 21 ms — 254 行 × 49 列
-- [PASS] `summarize_dataset` 34 ms — 49 变量概要（全量）
-- [PASS] `get_value_labels` 3 ms — 无值标签
-- [PASS] `frequency` 4 ms — SEX: 2 取值 / 返回 2 / 分母 254 / include_missing=True
-- [PASS] `read_dataset` 5 ms — 返回 1 行 / 过滤后 254 行 / offset=166
-- [PASS] `query_dataset` 63 ms — 1 行结果（group_by）
-- [PASS] `search_variables` 273 ms — AVGDD: 命中 3 个数据集 / contains=True
+- [PASS] `list_datasets` 633 ms — pattern='ads' 命中 3 个
+- [PASS] `get_dataset_metadata` 28 ms — 254 行 × 49 列
+- [PASS] `summarize_dataset` 38 ms — 49 变量概要（全量）
+- [PASS] `get_value_labels` 4 ms — 无值标签
+- [PASS] `frequency` 6 ms — SEX: 2 取值 / 返回 2 / 分母 254 / include_missing=True
+- [PASS] `read_dataset` 10 ms — 返回 1 行 / 过滤后 254 行 / offset=166
+- [PASS] `query_dataset` 78 ms — 1 行结果（group_by）
+- [PASS] `search_variables` 376 ms — AVGDD: 命中 3 个数据集 / contains=True
 
 **`sasdata/adam/adlbcpv.sas7bdat`**（`sasdata/adam`，16.0 MB）
 
-- [PASS] `list_datasets` 4 ms — pattern='adl' 命中 15 个
-- [PASS] `get_dataset_metadata` 13 ms — 37132 行 × 46 列
-- [PASS] `summarize_dataset` 179 ms — 3 变量概要（列子集）
-- [PASS] `get_value_labels` 4 ms — 无值标签
-- [PASS] `frequency` 6 ms — AENTMTFL: 2 取值 / 返回 2 / 分母 37132 / include_missing=True
-- [PASS] `read_dataset` 39 ms — 返回 1 行 / 过滤后 37122 行 / offset=10368
-- [PASS] `query_dataset` 144 ms — 1 行结果（group_by）
-- [PASS] `search_variables` 298 ms — RACEN: 命中 36 个数据集 / contains=False
+- [PASS] `list_datasets` 5 ms — pattern='adl' 命中 15 个
+- [PASS] `get_dataset_metadata` 12 ms — 37132 行 × 46 列
+- [PASS] `summarize_dataset` 230 ms — 3 变量概要（列子集）
+- [PASS] `get_value_labels` 2 ms — 无值标签
+- [PASS] `frequency` 4 ms — AENTMTFL: 2 取值 / 返回 2 / 分母 37132 / include_missing=True
+- [PASS] `read_dataset` 47 ms — 返回 1 行 / 过滤后 37122 行 / offset=10368
+- [PASS] `query_dataset` 159 ms — 1 行结果（group_by）
+- [PASS] `search_variables` 359 ms — RACEN: 命中 36 个数据集 / contains=False
 
 **`sasdata/adam/adlbhpv.sas7bdat`**（`sasdata/adam`，11.2 MB）
 
-- [PASS] `list_datasets` 8 ms — pattern='adl' 命中 15 个
-- [PASS] `get_dataset_metadata` 14 ms — 24966 行 × 46 列
-- [PASS] `summarize_dataset` 320 ms — 46 变量概要（全量）
-- [PASS] `get_value_labels` 4 ms — 无值标签
+- [PASS] `list_datasets` 5 ms — pattern='adl' 命中 15 个
+- [PASS] `get_dataset_metadata` 12 ms — 24966 行 × 46 列
+- [PASS] `summarize_dataset` 332 ms — 46 变量概要（全量）
+- [PASS] `get_value_labels` 3 ms — 无值标签
 - [PASS] `frequency` 4 ms — SEX: 2 取值 / 返回 2 / 分母 24966 / include_missing=False
-- [PASS] `read_dataset` 4 ms — 返回 3 行 / 过滤后 24966 行 / offset=3050
-- [PASS] `query_dataset` 107 ms — COUNT(*)=24966（元数据 24966 行）
+- [PASS] `read_dataset` 5 ms — 返回 3 行 / 过滤后 24966 行 / offset=3050
+- [PASS] `query_dataset` 126 ms — COUNT(*)=24966（元数据 24966 行）
 - [PASS] `search_variables` 377 ms — RACEN: 命中 36 个数据集 / contains=True
 
 **`sasdata/sdtm/sc.sas7bdat`**（`sasdata/sdtm`，128.0 KB）
 
 - [PASS] `list_datasets` 4 ms — pattern='sc' 命中 5 个
-- [PASS] `get_dataset_metadata` 5 ms — 254 行 × 14 列
-- [PASS] `summarize_dataset` 9 ms — 6 变量概要（列子集）
+- [PASS] `get_dataset_metadata` 6 ms — 254 行 × 14 列
+- [PASS] `summarize_dataset` 8 ms — 6 变量概要（列子集）
 - [PASS] `get_value_labels` 2 ms — 无值标签
-- [PASS] `frequency` 5 ms — SCDTC: 207 取值 / 返回 10 / 分母 254 / include_missing=False
+- [PASS] `frequency` 3 ms — SCDTC: 207 取值 / 返回 10 / 分母 254 / include_missing=False
 - [PASS] `read_dataset` 4 ms — 返回 3 行 / 过滤后 254 行 / offset=1
-- [PASS] `query_dataset` 23 ms — COUNT(*)=254（元数据 254 行）
-- [PASS] `search_variables` 352 ms — SCSTRESN: 命中 3 个数据集 / contains=True
+- [PASS] `query_dataset` 22 ms — COUNT(*)=254（元数据 254 行）
+- [PASS] `search_variables` 358 ms — SCSTRESN: 命中 3 个数据集 / contains=True
 
 **`sasdata/sdtm/supplb.sas7bdat`**（`sasdata/sdtm`，54.6 MB）
 
-- [PASS] `list_datasets` 5 ms — pattern='sup' 命中 12 个
-- [PASS] `get_dataset_metadata` 30 ms — 64403 行 × 10 列
-- [PASS] `summarize_dataset` 284 ms — 5 变量概要（列子集）
+- [PASS] `list_datasets` 4 ms — pattern='sup' 命中 12 个
+- [PASS] `get_dataset_metadata` 29 ms — 64403 行 × 10 列
+- [PASS] `summarize_dataset` 246 ms — 5 变量概要（列子集）
 - [PASS] `get_value_labels` 3 ms — 无值标签
-- [PASS] `frequency` 10 ms — QVAL: 61 取值 / 返回 50 / 分母 64403 / include_missing=False
+- [PASS] `frequency` 14 ms — QVAL: 61 取值 / 返回 50 / 分母 64403 / include_missing=False
 - [PASS] `read_dataset` 4 ms — 返回 3 行 / 过滤后 64403 行 / offset=4184
-- [PASS] `query_dataset` 123 ms — 100 行结果（projection）
-- [PASS] `search_variables` 386 ms — USUBJID: 命中 87 个数据集 / contains=False
+- [PASS] `query_dataset` 126 ms — 100 行结果（projection）
+- [PASS] `search_variables` 344 ms — USUBJID: 命中 87 个数据集 / contains=False
 
 **`sasdata/sdtm/sv.sas7bdat`**（`sasdata/sdtm`，384.0 KB）
 
-- [PASS] `list_datasets` 5 ms — pattern='sv' 命中 3 个
+- [PASS] `list_datasets` 6 ms — pattern='sv' 命中 3 个
 - [PASS] `get_dataset_metadata` 4 ms — 3559 行 × 8 列
-- [PASS] `summarize_dataset` 12 ms — 3 变量概要（列子集）
+- [PASS] `summarize_dataset` 20 ms — 3 变量概要（列子集）
 - [PASS] `get_value_labels` 3 ms — 无值标签
-- [PASS] `frequency` 3 ms — VISIT: 36 取值 / 返回 10 / 分母 3559 / include_missing=False
+- [PASS] `frequency` 5 ms — VISIT: 36 取值 / 返回 10 / 分母 3559 / include_missing=False
 - [PASS] `read_dataset` 4 ms — 返回 0 行 / 过滤后 2803 行 / offset=3335
-- [PASS] `query_dataset` 26 ms — 20 行结果（projection）
-- [PASS] `search_variables` 341 ms — VISITNUM: 命中 54 个数据集 / contains=True
+- [PASS] `query_dataset` 29 ms — 20 行结果（projection）
+- [PASS] `search_variables` 335 ms — VISITNUM: 命中 54 个数据集 / contains=True
 
 **`sasdata_cn/adam/adsl.sas7bdat`**（`sasdata_cn/adam`，192.0 KB）
 
-- [PASS] `list_datasets` 6 ms — pattern='ads' 命中 3 个
-- [PASS] `get_dataset_metadata` 8 ms — 254 行 × 49 列
+- [PASS] `list_datasets` 3 ms — pattern='ads' 命中 3 个
+- [PASS] `get_dataset_metadata` 5 ms — 254 行 × 49 列
 - [PASS] `summarize_dataset` 9 ms — 2 变量概要（列子集）
 - [PASS] `get_value_labels` 3 ms — 无值标签
-- [PASS] `frequency` 5 ms — AGEGR1N: 3 取值 / 返回 3 / 分母 254 / include_missing=False
-- [PASS] `read_dataset` 3 ms — 返回 1 行 / 过滤后 254 行 / offset=171
-- [PASS] `query_dataset` 28 ms — 5 行结果（projection）
-- [PASS] `search_variables` 395 ms — COMP16FL: 命中 3 个数据集 / contains=True
+- [PASS] `frequency` 2 ms — AGEGR1N: 3 取值 / 返回 3 / 分母 254 / include_missing=False
+- [PASS] `read_dataset` 4 ms — 返回 1 行 / 过滤后 254 行 / offset=171
+- [PASS] `query_dataset` 27 ms — 5 行结果（projection）
+- [PASS] `search_variables` 309 ms — COMP16FL: 命中 3 个数据集 / contains=True
 
 **`sasdata_cn/adam/adlbcpv.sas7bdat`**（`sasdata_cn/adam`，16.0 MB）
 
 - [PASS] `list_datasets` 5 ms — pattern='adl' 命中 15 个
-- [PASS] `get_dataset_metadata` 15 ms — 37132 行 × 46 列
-- [PASS] `summarize_dataset` 229 ms — 2 变量概要（列子集）
-- [PASS] `get_value_labels` 2 ms — 无值标签
+- [PASS] `get_dataset_metadata` 12 ms — 37132 行 × 46 列
+- [PASS] `summarize_dataset` 216 ms — 2 变量概要（列子集）
+- [PASS] `get_value_labels` 3 ms — 无值标签
 - [PASS] `frequency` 4 ms — PARAMN: 18 取值 / 返回 18 / 分母 37132 / include_missing=True
 - [PASS] `read_dataset` 5 ms — 返回 10 行 / 过滤后 37132 行 / offset=27397
-- [PASS] `query_dataset` 175 ms — 1 行结果（group_by）
-- [PASS] `search_variables` 422 ms — R2A1HI: 命中 15 个数据集 / contains=True
+- [PASS] `query_dataset` 160 ms — 1 行结果（group_by）
+- [PASS] `search_variables` 458 ms — R2A1HI: 命中 15 个数据集 / contains=True
 
 **`sasdata_cn/adam/adlbh.sas7bdat`**（`sasdata_cn/adam`，9.9 MB）
 
-- [PASS] `list_datasets` 4 ms — pattern='adl' 命中 15 个
-- [PASS] `get_dataset_metadata` 10 ms — 24966 行 × 46 列
-- [PASS] `summarize_dataset` 451 ms — 46 变量概要（全量）
+- [PASS] `list_datasets` 7 ms — pattern='adl' 命中 15 个
+- [PASS] `get_dataset_metadata` 12 ms — 24966 行 × 46 列
+- [PASS] `summarize_dataset` 461 ms — 46 变量概要（全量）
 - [PASS] `get_value_labels` 4 ms — 无值标签
-- [PASS] `frequency` 7 ms — SEX: 2 取值 / 返回 2 / 分母 24966 / include_missing=False
-- [PASS] `read_dataset` 4 ms — 返回 25 行 / 过滤后 24966 行 / offset=3395
-- [PASS] `query_dataset` 141 ms — 20 行结果（projection）
-- [PASS] `search_variables` 385 ms — LBSEQ: 命中 15 个数据集 / contains=False
+- [PASS] `frequency` 5 ms — SEX: 2 取值 / 返回 2 / 分母 24966 / include_missing=False
+- [PASS] `read_dataset` 5 ms — 返回 25 行 / 过滤后 24966 行 / offset=3395
+- [PASS] `query_dataset` 143 ms — 20 行结果（projection）
+- [PASS] `search_variables` 369 ms — LBSEQ: 命中 15 个数据集 / contains=False
 
 **`sasdata_cn/sdtm/sc.sas7bdat`**（`sasdata_cn/sdtm`，128.0 KB）
 
 - [PASS] `list_datasets` 5 ms — pattern='sc' 命中 5 个
-- [PASS] `get_dataset_metadata` 4 ms — 254 行 × 14 列
-- [PASS] `summarize_dataset` 20 ms — 14 变量概要（全量）
-- [PASS] `get_value_labels` 3 ms — 无值标签
-- [PASS] `frequency` 6 ms — SCSTRESN: 19 取值 / 返回 19 / 分母 254 / include_missing=True
-- [PASS] `read_dataset` 7 ms — 返回 3 行 / 过滤后 254 行 / offset=22
-- [PASS] `query_dataset` 24 ms — 5 行结果（projection）
-- [PASS] `search_variables` 419 ms — SCCAT: 命中 3 个数据集 / contains=True
+- [PASS] `get_dataset_metadata` 5 ms — 254 行 × 14 列
+- [PASS] `summarize_dataset` 15 ms — 14 变量概要（全量）
+- [PASS] `get_value_labels` 4 ms — 无值标签
+- [PASS] `frequency` 3 ms — SCSTRESN: 19 取值 / 返回 19 / 分母 254 / include_missing=True
+- [PASS] `read_dataset` 5 ms — 返回 3 行 / 过滤后 254 行 / offset=22
+- [PASS] `query_dataset` 23 ms — 5 行结果（projection）
+- [PASS] `search_variables` 336 ms — SCCAT: 命中 3 个数据集 / contains=True
 
 **`sasdata_cn/sdtm/supplb.sas7bdat`**（`sasdata_cn/sdtm`，54.6 MB）
 
-- [PASS] `list_datasets` 6 ms — pattern='sup' 命中 12 个
-- [PASS] `get_dataset_metadata` 38 ms — 64403 行 × 10 列
-- [PASS] `summarize_dataset` 349 ms — 6 变量概要（列子集）
-- [PASS] `get_value_labels` 2 ms — 无值标签
+- [PASS] `list_datasets` 4 ms — pattern='sup' 命中 12 个
+- [PASS] `get_dataset_metadata` 29 ms — 64403 行 × 10 列
+- [PASS] `summarize_dataset` 377 ms — 6 变量概要（列子集）
+- [PASS] `get_value_labels` 3 ms — 无值标签
 - [PASS] `frequency` 13 ms — QVAL: 61 取值 / 返回 50 / 分母 64403 / include_missing=False
 - [PASS] `read_dataset` 7 ms — 返回 10 行 / 过滤后 64403 行 / offset=43487
-- [PASS] `query_dataset` 149 ms — COUNT(*)=64403（元数据 64403 行）
-- [PASS] `search_variables` 372 ms — STUDYID: 命中 102 个数据集 / contains=True
+- [PASS] `query_dataset` 153 ms — COUNT(*)=64403（元数据 64403 行）
+- [PASS] `search_variables` 353 ms — STUDYID: 命中 102 个数据集 / contains=True
 
 **`sasdata_cn/sdtm/ts.sas7bdat`**（`sasdata_cn/sdtm`，128.0 KB）
 
 - [PASS] `list_datasets` 4 ms — pattern='ts' 命中 3 个
-- [PASS] `get_dataset_metadata` 3 ms — 33 行 × 6 列
-- [PASS] `summarize_dataset` 9 ms — 6 变量概要（全量）
-- [PASS] `get_value_labels` 2 ms — 无值标签
-- [PASS] `frequency` 4 ms — TSSEQ: 4 取值 / 返回 4 / 分母 33 / include_missing=False
-- [PASS] `read_dataset` 3 ms — 返回 10 行 / 过滤后 33 行 / offset=7
-- [PASS] `query_dataset` 27 ms — COUNT(*)=33（元数据 33 行）
-- [PASS] `search_variables` 365 ms — STUDYID: 命中 102 个数据集 / contains=True
+- [PASS] `get_dataset_metadata` 4 ms — 33 行 × 6 列
+- [PASS] `summarize_dataset` 8 ms — 6 变量概要（全量）
+- [PASS] `get_value_labels` 4 ms — 无值标签
+- [PASS] `frequency` 3 ms — TSSEQ: 4 取值 / 返回 4 / 分母 33 / include_missing=False
+- [PASS] `read_dataset` 5 ms — 返回 10 行 / 过滤后 33 行 / offset=7
+- [PASS] `query_dataset` 22 ms — COUNT(*)=33（元数据 33 行）
+- [PASS] `search_variables` 340 ms — STUDYID: 命中 102 个数据集 / contains=True
 
 **`xpt/adam/adtte.xpt`**（`xpt/adam`，71.8 KB）
 
-- [PASS] `list_datasets` 5 ms — pattern='adt' 命中 3 个
-- [PASS] `get_dataset_metadata` 17 ms — 254 行 × 26 列
-- [PASS] `summarize_dataset` 25 ms — 26 变量概要（全量）
-- [PASS] `get_value_labels` 2 ms — 无值标签
-- [PASS] `frequency` 4 ms — SEX: 2 取值 / 返回 2 / 分母 254 / include_missing=True
-- [PASS] `read_dataset` 3 ms — 返回 25 行 / 过滤后 254 行 / offset=153
-- [PASS] `query_dataset` 28 ms — 100 行结果（projection）
-- [PASS] `search_variables` 340 ms — TRTSDT: 命中 36 个数据集 / contains=True
+- [PASS] `list_datasets` 9 ms — pattern='adt' 命中 3 个
+- [PASS] `get_dataset_metadata` 25 ms — 254 行 × 26 列
+- [PASS] `summarize_dataset` 33 ms — 26 变量概要（全量）
+- [PASS] `get_value_labels` 3 ms — 无值标签
+- [PASS] `frequency` 6 ms — SEX: 2 取值 / 返回 2 / 分母 254 / include_missing=True
+- [PASS] `read_dataset` 7 ms — 返回 25 行 / 过滤后 254 行 / offset=153
+- [PASS] `query_dataset` 35 ms — 100 行结果（projection）
+- [PASS] `search_variables` 458 ms — TRTSDT: 命中 36 个数据集 / contains=True
 
 **`xpt/adam/adlbcpv.xpt`**（`xpt/adam`，15.8 MB）
 
 - [PASS] `list_datasets` 5 ms — pattern='adl' 命中 15 个
-- [PASS] `get_dataset_metadata` 586 ms — 37132 行 × 46 列
-- [PASS] `summarize_dataset` 17 ms — 6 变量概要（列子集）
-- [PASS] `get_value_labels` 3 ms — 无值标签
-- [PASS] `frequency` 4 ms — COMP24FL: 2 取值 / 返回 2 / 分母 37132 / include_missing=True
-- [PASS] `read_dataset` 6 ms — 返回 10 行 / 过滤后 37132 行 / offset=19184
-- [PASS] `query_dataset` 160 ms — 1 行结果（group_by）
-- [PASS] `search_variables` 357 ms — ALBTRVAL: 命中 12 个数据集 / contains=True
+- [PASS] `get_dataset_metadata` 629 ms — 37132 行 × 46 列
+- [PASS] `summarize_dataset` 19 ms — 6 变量概要（列子集）
+- [PASS] `get_value_labels` 4 ms — 无值标签
+- [PASS] `frequency` 6 ms — COMP24FL: 2 取值 / 返回 2 / 分母 37132 / include_missing=True
+- [PASS] `read_dataset` 5 ms — 返回 10 行 / 过滤后 37132 行 / offset=19184
+- [PASS] `query_dataset` 189 ms — 1 行结果（group_by）
+- [PASS] `search_variables` 408 ms — ALBTRVAL: 命中 12 个数据集 / contains=True
 
 **`xpt/adam/adcibc.xpt`**（`xpt/adam`，283.7 KB）
 
-- [PASS] `list_datasets` 4 ms — pattern='adc' 命中 1 个
-- [PASS] `get_dataset_metadata` 29 ms — 730 行 × 36 列
+- [PASS] `list_datasets` 3 ms — pattern='adc' 命中 1 个
+- [PASS] `get_dataset_metadata` 30 ms — 730 行 × 36 列
 - [PASS] `summarize_dataset` 7 ms — 4 变量概要（列子集）
-- [PASS] `get_value_labels` 2 ms — 无值标签
-- [PASS] `frequency` 2 ms — DTYPE: 2 取值 / 返回 2 / 分母 730 / include_missing=False
-- [PASS] `read_dataset` 5 ms — 返回 3 行 / 过滤后 730 行 / offset=673
-- [PASS] `query_dataset` 30 ms — 1 行结果（group_by）
-- [PASS] `search_variables` 339 ms — ADT: 命中 30 个数据集 / contains=True
+- [PASS] `get_value_labels` 4 ms — 无值标签
+- [PASS] `frequency` 6 ms — DTYPE: 2 取值 / 返回 2 / 分母 730 / include_missing=False
+- [PASS] `read_dataset` 6 ms — 返回 3 行 / 过滤后 730 行 / offset=673
+- [PASS] `query_dataset` 51 ms — 1 行结果（group_by）
+- [PASS] `search_variables` 444 ms — ADT: 命中 30 个数据集 / contains=True
 
 **`xpt/sdtm/suppds.xpt`**（`xpt/sdtm`，4.8 KB）
 
-- [PASS] `list_datasets` 6 ms — pattern='sup' 命中 12 个
-- [PASS] `get_dataset_metadata` 10 ms — 3 行 × 10 列
-- [PASS] `summarize_dataset` 8 ms — 3 变量概要（列子集）
-- [PASS] `get_value_labels` 4 ms — 无值标签
-- [PASS] `frequency` 4 ms — QEVAL: 1 取值 / 返回 1 / 分母 3 / include_missing=False
-- [PASS] `read_dataset` 4 ms — 返回 2 行 / 过滤后 3 行 / offset=1
-- [PASS] `query_dataset` 27 ms — COUNT(*)=3（元数据 3 行）
-- [PASS] `search_variables` 465 ms — QNAM: 命中 12 个数据集 / contains=False
+- [PASS] `list_datasets` 3 ms — pattern='sup' 命中 12 个
+- [PASS] `get_dataset_metadata` 8 ms — 3 行 × 10 列
+- [PASS] `summarize_dataset` 6 ms — 3 变量概要（列子集）
+- [PASS] `get_value_labels` 2 ms — 无值标签
+- [PASS] `frequency` 2 ms — QEVAL: 1 取值 / 返回 1 / 分母 3 / include_missing=False
+- [PASS] `read_dataset` 3 ms — 返回 2 行 / 过滤后 3 行 / offset=1
+- [PASS] `query_dataset` 20 ms — COUNT(*)=3（元数据 3 行）
+- [PASS] `search_variables` 390 ms — QNAM: 命中 12 个数据集 / contains=False
 
 **`xpt/sdtm/supplb.xpt`**（`xpt/sdtm`，54.1 MB）
 
-- [PASS] `list_datasets` 8 ms — pattern='sup' 命中 12 个
-- [PASS] `get_dataset_metadata` 1082 ms — 64403 行 × 10 列
-- [PASS] `summarize_dataset` 162 ms — 4 变量概要（列子集）
-- [PASS] `get_value_labels` 6 ms — 无值标签
-- [PASS] `frequency` 23 ms — QLABEL: 2 取值 / 返回 2 / 分母 64403 / include_missing=False
-- [PASS] `read_dataset` 16 ms — 返回 1 行 / 过滤后 64403 行 / offset=30747
-- [PASS] `query_dataset` 237 ms — 5 行结果（projection）
-- [PASS] `search_variables` 515 ms — QNAM: 命中 12 个数据集 / contains=True
+- [PASS] `list_datasets` 6 ms — pattern='sup' 命中 12 个
+- [PASS] `get_dataset_metadata` 825 ms — 64403 行 × 10 列
+- [PASS] `summarize_dataset` 108 ms — 4 变量概要（列子集）
+- [PASS] `get_value_labels` 3 ms — 无值标签
+- [PASS] `frequency` 12 ms — QLABEL: 2 取值 / 返回 2 / 分母 64403 / include_missing=False
+- [PASS] `read_dataset` 10 ms — 返回 1 行 / 过滤后 64403 行 / offset=30747
+- [PASS] `query_dataset` 127 ms — 5 行结果（projection）
+- [PASS] `search_variables` 351 ms — QNAM: 命中 12 个数据集 / contains=True
 
 **`xpt/sdtm/cm.xpt`**（`xpt/sdtm`，3.6 MB）
 
-- [PASS] `list_datasets` 5 ms — pattern='cm' 命中 3 个
-- [PASS] `get_dataset_metadata` 141 ms — 7510 行 × 21 列
-- [PASS] `summarize_dataset` 28 ms — 5 变量概要（列子集）
-- [PASS] `get_value_labels` 4 ms — 无值标签
-- [PASS] `frequency` 7 ms — VISIT: 15 取值 / 返回 10 / 分母 7510 / include_missing=False
-- [PASS] `read_dataset` 6 ms — 返回 3 行 / 过滤后 7510 行 / offset=3856
-- [PASS] `query_dataset` 73 ms — 1 行结果（group_by）
-- [PASS] `search_variables` 435 ms — CMSPID: 命中 3 个数据集 / contains=True
+- [PASS] `list_datasets` 4 ms — pattern='cm' 命中 3 个
+- [PASS] `get_dataset_metadata` 98 ms — 7510 行 × 21 列
+- [PASS] `summarize_dataset` 15 ms — 5 变量概要（列子集）
+- [PASS] `get_value_labels` 2 ms — 无值标签
+- [PASS] `frequency` 5 ms — VISIT: 15 取值 / 返回 10 / 分母 7510 / include_missing=False
+- [PASS] `read_dataset` 3 ms — 返回 3 行 / 过滤后 7510 行 / offset=3856
+- [PASS] `query_dataset` 42 ms — 1 行结果（group_by）
+- [PASS] `search_variables` 289 ms — CMSPID: 命中 3 个数据集 / contains=True
 
 **跨数据集 JOIN**
 
-- [PASS] `query_dataset(JOIN)` 449 ms — adsl ⋈ adlbcpv = 37132 行
+- [PASS] `query_dataset(JOIN)` 398 ms — adsl ⋈ adlbcpv = 37132 行
 
 **跨数据集 JOIN**
 
-- [PASS] `query_dataset(JOIN)` 329 ms — sc ⋈ supplb = 64403 行
+- [PASS] `query_dataset(JOIN)` 255 ms — sc ⋈ supplb = 64403 行
 
 **跨数据集 JOIN**
 
-- [PASS] `query_dataset(JOIN)` 480 ms — adsl ⋈ adlbcpv = 37132 行
+- [PASS] `query_dataset(JOIN)` 400 ms — adsl ⋈ adlbcpv = 37132 行
 
 **跨数据集 JOIN**
 
-- [PASS] `query_dataset(JOIN)` 351 ms — sc ⋈ supplb = 64403 行
+- [PASS] `query_dataset(JOIN)` 346 ms — sc ⋈ supplb = 64403 行
 
 **跨数据集 JOIN**
 
-- [PASS] `query_dataset(JOIN)` 1050 ms — adtte ⋈ adlbcpv = 37132 行
+- [PASS] `query_dataset(JOIN)` 1124 ms — adtte ⋈ adlbcpv = 37132 行
 
 **跨数据集 JOIN**
 
-- [PASS] `query_dataset(JOIN)` 1288 ms — suppds ⋈ supplb = 162 行
+- [PASS] `query_dataset(JOIN)` 778 ms — suppds ⋈ supplb = 162 行
 
 </details>
 
@@ -529,20 +529,18 @@ python tests/random_smoke.py --seed 20261020 --per-category 3 --out README.md
 - 覆盖类别：6 个（`sasdata/adam`、`sasdata/sdtm`、`sasdata_cn/adam`、`sasdata_cn/sdtm`、`xpt/adam`、`xpt/sdtm`）
 - 抽检文件：18 个
 - 工具调用：150 次，成功 150 次，失败 0 次
-- 端到端耗时：18.8 s
+- 端到端耗时：18.7 s
 
 全部用例通过（无失败明细）。
 
 <!-- RANDOM-SMOKE-END -->
 
-## 与原版 `sassoftware/sas-mcp-server` 的差异
+## 与 `sassoftware/sas-mcp-server` 的差异
 
-上游 [sassoftware/sas-mcp-server](https://github.com/sassoftware/sas-mcp-server) 是连接
-**SAS Viya** 的 MCP 服务器（v1.18.0：92 个工具、10 个可选 tier，覆盖执行 SAS 代码、AutoML、
-模型打分等分析全生命周期）。本仓库沿用其 FastMCP 架构与 `register(mcp, ...)` 工具注册模式，
-把数据源换成本地文件并大幅收敛范围——从"在 Viya 上干活"变成"把本地数据读给模型看"。
+两个项目都用 Python + [FastMCP](https://github.com/jlowin/fastmcp) 实现 MCP 服务器，
+其余在数据源、运行依赖、工具集、运行形态与安全模型上均不同。
 
-| 维度 | 原版 | 本仓库 |
+| 维度 | sassoftware/sas-mcp-server | 本仓库（sas-local-mcp） |
 | --- | --- | --- |
 | 数据源 | Viya 平台（Compute / CAS / 模型 REST API） | 本地 `.sas7bdat` / `.xpt` 文件 |
 | 认证 | OAuth2 PKCE 流程 + 本地 token 缓存 | 无需认证（无网络出口） |
@@ -567,6 +565,7 @@ python tests/random_smoke.py --seed 20261020 --per-category 3 --out README.md
 sas-local-mcp/
 ├── pyproject.toml          # 依赖与构建配置
 ├── README.md
+├── LICENSE                # MIT
 ├── src/
 │   └── sas_local_mcp/
 │       ├── __init__.py
@@ -587,4 +586,8 @@ sas-local-mcp/
 
 ## 许可证
 
-派生自 [sassoftware/sas-mcp-server](https://github.com/sassoftware/sas-mcp-server)（Apache-2.0）。
+本项目代码采用 **MIT License**，详见 [LICENSE](LICENSE)。
+
+> 注意：随仓库附带的测试数据取自 R Consortium
+> [submissions-pilot5-datasetjson](https://github.com/RConsortium/submissions-pilot5-datasetjson)
+> 公开示例提交包，其许可与本仓库代码许可相互独立，请以该来源仓库的声明为准。

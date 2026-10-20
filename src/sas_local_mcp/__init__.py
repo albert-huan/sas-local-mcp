@@ -1,7 +1,7 @@
 """sas-local-mcp: MCP server for reading local SAS datasets.
 
-Adapted from sassoftware/sas-mcp-server (Apache-2.0): the Viya/OAuth data
-plane is replaced by local .sas7bdat / .xpt file reads via pyreadstat.
+Reads local .sas7bdat / .xpt files via pyreadstat (pandas fallback) and exposes
+them to MCP clients as read-only tools.
 """
 
 __version__ = "0.1.0"

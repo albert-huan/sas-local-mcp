@@ -1,7 +1,7 @@
 """本地 SAS 数据集 MCP 工具。
 
-沿用 sassoftware/sas-mcp-server 的 register(mcp, ...) 注册模式，
-工具全部只读；DatasetError 统一转为 ToolError 以便客户端干净地展示错误。
+通过 register_tools(mcp) 注册全部只读工具；
+DatasetError 统一转为 ToolError 以便客户端干净地展示错误。
 """
 
 import functools

@@ -1,33 +1,34 @@
-"""为测试解析出真正的数据根，并让它在 config 读取前生效。
+"""测试环境准备：让 tests/ 直接从源码目录运行，并解析出真正的数据根。
 
-历史背景：测试数据曾直接放在 tests/ 根目录（只有 dm.sas7bdat / lb.sas7bdat），
-test_tools.py 里因此出现了一批"目录下只有两个数据集"的硬编码断言。
-后来数据按域与用途重新归置：
+1) `sys.path`：若 `sas_local_mcp` 尚未安装，把 `src/` 加进 `sys.path`，
+   这样不必先 `pip install -e .` 也能跑测试（已安装时这步无副作用）。
+2) `SAS_DATA_ROOT`：在 `tests/` 下递归定位 `dm.sas7bdat`，取其所在目录作为数据根，
+   兼容「tests/ 根目录直放」与「tests/sasdata/sdtm/ 分目录」两种布局，
+   因此 `path: "dm.sas7bdat"` 这类相对写法在数据目录搬动后依然成立。
 
-    tests/sasdata/sdtm/     英文 SDTM（23 个域）
-    tests/sasdata/sdtm/../adam/
-    tests/sasdata_cn/       中文版（编码回归用）
-    tests/xpt/              XPORT 版（格式回归用）
-
-本模块在 tests/ 下递归定位 dm.sas7bdat，取其所在目录作为 SAS_DATA_ROOT，
-因此无论数据目录怎么搬动，`path: "dm.sas7bdat"` 这类相对写法都成立。
-
-pytest 会在导入 test_tools.py 之前导入本模块，所以这里的环境变量一定早于
-sas_local_mcp.config 的 import-time 读取。
+pytest 会在导入 `test_tools.py` 之前导入本模块，所以这里的环境变量
+一定早于 `sas_local_mcp.config` 的 import-time 读取。
 """
 
 import os
+import sys
 from pathlib import Path
 
 TESTS_ROOT = Path(__file__).resolve().parent
-# 主锚点文件：定位到它所在目录即视为数据根
+SRC = TESTS_ROOT.parent / "src"
+
+# 1) 源码目录可直接导入
+if SRC.is_dir() and str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+# 2) 数据根：锚定 dm.sas7bdat 所在目录
 ANCHOR = "dm.sas7bdat"
 # 中文版 / XPORT 版是给编码与格式回归用的，普通用例优先取英文 sas7bdat 版
 DEPRECATED_PARTS = ("sasdata_cn", "xpt")
 
 
 def _locate_data_root() -> Path:
-    # 跳过隐藏目录（.pytest_cache、.sas_data_root 等历史残留）
+    # 跳过隐藏目录（.pytest_cache 等历史残留）
     hits = sorted(
         p for p in TESTS_ROOT.rglob(ANCHOR)
         if p.is_file() and not any(part.startswith(".") for part in p.relative_to(TESTS_ROOT).parts)
