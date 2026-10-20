@@ -29,6 +29,8 @@ htmlcov/
 .vscode/
 *.swp
 *.swo
+*.sas7bdat
+*.xpt
 
 # OS
 .DS_Store
