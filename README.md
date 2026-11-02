@@ -14,6 +14,11 @@
 
 所有工具均为**只读**，不会修改任何数据集文件。
 
+本次优化新增了局部读取、SQL 来源感知解码、独立缓存和响应字节预算。
+**升级后需更新依赖并重启 MCP 服务**。`where` 现在使用受限表达式，先过滤后投影；
+默认统计口径将字符空白计为 SAS 缺失。迁移说明与完整调用示例见
+[优化 1–6 使用说明](docs/optimizations-1-6.md)。
+
 ## 功能特性
 
 - 支持 SAS 两种常用格式：`.sas7bdat` 与传输格式 `.xpt`（XPORT）
@@ -24,7 +29,10 @@
 - 行预览与聚合结果**分开限流**：`GROUP BY` 的基数不会被行预览上限截断（见环境变量）
 - 内置 duckdb SQL 查询：仅执行单条 `SELECT`（支持 `WITH`/多表 JOIN），并支持结果值标签解码
 - `search_variables` 跨数据集变量搜索：直接回答"哪个数据集里有 `USUBJID`"
-- 解析结果按 (路径, mtime, size) 缓存，多轮问答不必反复解析大文件
+- 预览直接读取所需行列，过滤按块扫描；SQL 仅物化当前页，精确计数可以关闭
+- 元数据与数据独立缓存，按文件版本、编码及格式目录失效；数据缓存有内存预算和并发读取合并
+- 支持外部 `.sas7bcat` 值标签；保留 SAS 特殊数值缺失，明确统计缺失口径
+- 八个工具均公开输出 schema，长结果按行数与 JSON 字节预算分页
 - 通过 MCP 标准协议以 stdio 方式接入任意兼容客户端（CodeBuddy、Claude Desktop、Cursor 等）
 
 ## 工具一览
@@ -36,7 +44,7 @@
 
 | 工具 | 说明 | 关键参数 |
 | --- | --- | --- |
-| `list_datasets` | 递归列出 `SAS_DATA_ROOT` 下所有数据集文件（`.sas7bdat` / `.xpt` / `.sas7bcat`） | `pattern`（文件名子串过滤，不区分大小写）、`limit`（默认 500） |
+| `list_datasets` | 递归列出 `SAS_DATA_ROOT` 下所有数据集文件（`.sas7bdat` / `.xpt` / `.sas7bcat`） | `pattern`（文件名子串过滤，不区分大小写）、`limit`（默认 500）、`offset` |
 | `get_dataset_metadata` | 行数、每变量 label/type/informat、文件标签、创建时间（不加载数据内容；`.xpt` 例外，见下） | `path` |
 | `summarize_dataset` | 逐变量概要统计——了解一张表的首选入口：缺失率、唯一值数，按类型给分布指标 | `path`、`columns`、`apply_labels` |
 | `frequency` | 单变量频数表：各取值的 `n` 与占比，**默认自动套用 SAS 值标签** | `path`、`column`、`limit`、`offset`、`apply_labels`、`include_missing` |
@@ -50,14 +58,17 @@
 
 ### 各工具参数与返回
 
-- **`list_datasets(pattern?, limit=500)`**
+- **`list_datasets(pattern?, limit=500, offset=0)`**
   - 返回 `{ root, count, datasets: [{ path, name, format, size_bytes, modified }] }`。
+  - `count` 为完整目录计数，`returned` 为当前页条数，按 `next_offset` 继续获取。
 - **`get_dataset_metadata(path)`**
   - 返回 `{ number_rows, number_columns, file_label, created, modified, columns: [{ name, label, type, format, informat }] }`。
   - `type` 的日期判定同时看 `informat` 与 `format`（SAS 日期列常只带 format，如 `DATE9.`）。
-  - **`.xpt` 会多读一次**：pyreadstat 对 XPORT 的 metadata-only 读取不返回行数
+  - **`.xpt` 需要额外计数**：pyreadstat 对 XPORT 的 metadata-only 读取不返回行数
     （`meta.number_rows` 为 `None`、df 为空），直接采信会把 6 万行的数据集报成 0 行。
-    此时本工具会退回全量读取数一次行数，结果同样进缓存，后续调用不会再重复解析。
+    此时本工具分块读取一列计数，只缓存计数；`include_row_count=False` 可跳过扫描，未知行数返回 `null`。
+  - 新增 `logical_type`（date/time/datetime/string/numeric）、`sas_unit` 和存储宽度；
+    变量元数据支持 `column_offset` / `column_limit` 分页。
 - **`summarize_dataset(path, columns?, apply_labels=False)`**
   - 每个变量返回 `{ name, label, type, n, n_missing, pct_missing, n_distinct, has_value_labels, stats }`。
   - `stats` 按类型不同：
@@ -65,7 +76,7 @@
     - 日期 → `{ min, max }`
     - 字符 → `{ max_length, top_values: [{ value, label, n, pct }] }`（Top5）
   - `has_value_labels` 为 `True` 时提示改用 `frequency` 看解码后的分布。
-  - `columns` 不传则统计全部变量。
+  - `columns` 不传则选择全部变量，按 `offset` / `limit` 分页计算。`stats_mode="counts"` 跳过分布计算。
 - **`frequency(path, column, limit=50, offset=0, apply_labels=True, include_missing=False)`**
   - 返回 `{ total_rows, n_missing, n_distinct, denominator, value_labels_applied, levels, returned, truncated }`。
   - `levels` 每项 `{ value, label, n, pct }`，按 `n` 降序；`value` 是原始码值，`label` 是解码后的文本。
@@ -75,9 +86,11 @@
   - 结果上限取 `SAS_LOCAL_MCP_MAX_AGG_ROWS`（默认 1000），**不受行预览上限影响**。
 - **`read_dataset(path, limit=20, offset=0, columns?, where?, apply_labels=False)`**
   - `columns`：只返回指定变量列表。
-  - `where`：pandas 查询表达式，如 `"AGE > 18"` 或 `"SEX == 'F'"`。
-  - `where` 是在 `columns` 投影**之后**求值的：过滤条件只能引用 `columns` 里保留的变量，
-    否则会返回「where 条件无法应用」。想按某列过滤时，记得把它一并放进 `columns`。
+  - `where`：受限表达式，如 `"AGE > 18 and SEX == 'F'"`；支持比较、数值算术、`in/not in`、
+    `is None/is not None` 和布尔组合，不允许函数调用、属性访问或 `@` 外部变量。
+  - 过滤在 `columns` 投影**之前**执行，过滤列可以不出现在返回列中。
+  - 无过滤时直接局部读取；有过滤时分块扫描并仅保留当前页。
+    `include_row_count=False` 可在找到下一页后提前停止，未知的 `rows_after_filter` 返回 `null`。
   - `apply_labels=True` 时把 coded 值替换为 SAS 值标签文本。
   - `offset` 用于翻到数据中部/尾部取样——只看前几行容易误判（临床数据前几行常属同一受试者）。
   - 返回 `{ columns, records, total_rows, rows_after_filter, offset, returned, truncated }`，
@@ -94,8 +107,12 @@
     SELECT COUNT(*) AS n FROM dataset d INNER JOIN lb l USING (USUBJID)
     ```
 
-  - `apply_labels=True` 把结果里的 coded 值译为值标签文本。
+  - `apply_labels=True` 只自动解码来源明确的原始列，支持别名和简单多表投影；聚合、表达式、
+    CTE、子查询和歧义列保留原值。可通过 `label_sources` 显式指定来源。
+  - `label_decoding` 按列回传来源、状态与本页实际解码数量；未解码时 `value_labels_applied=false`。
   - 返回查询结果 records，上限取 `SAS_LOCAL_MCP_MAX_AGG_ROWS`，支持 `offset` 翻页。
+    `include_total=False` 跳过精确计数，`total_rows=null`。分页在 DuckDB 中执行；
+    `order_by_present` 指示最外层是否带排序，稳定翻页需要唯一排序键。
 - **`search_variables(variable, pattern?, contains=False, limit=50, max_datasets=200)`**
   - 回答"哪个数据集里有某个变量"。默认**精确匹配**（不区分大小写），`contains=True` 改为子串匹配
     （如 `AGE` 命中 `AGE` / `AGEU`）。
@@ -103,9 +120,19 @@
   - 返回 `{ datasets_scanned, datasets_matched, matches: [{ path, dataset, variable, label, type, number_rows }], scan_truncated, truncated, errors }`；
     `scan_truncated=true` 表示达到 `max_datasets` 后仍有未扫描的数据集，结果可能不完整。
     损坏文件记入 `errors` 而不中断整个搜索。
+  - 先使用 `next_offset` 取完当前扫描窗口的匹配结果，再以 `next_scan_offset` 继续扫描并重置 `offset=0`。
+
+读取、元数据、摘要、频数和值标签工具均可传入 `catalog_path`；SQL 使用
+`catalog_paths={"注册表名": "格式目录路径"}`。格式目录也必须位于 `SAS_DATA_ROOT` 内。
+`missing_policy="sas"` 默认把字符空白纳入缺失；传入 `"pandas"` 可保留旧的字符缺失口径。
+`.A`–`.Z`、`._` 在原始记录中保留为字符串，统计时计入缺失，细分数量见 `missing_details`；
+SQL 将这些特殊缺失转为 `NULL`，并返回 `special_missing_values`。
+
+所有成功响应包含 `response_bytes` 和 `response_truncated`。字节预算可能进一步缩短当前页，
+请始终使用服务返回的下一页偏移；单条结果过大时返回 `[RESPONSE_TOO_LARGE]`，不会切断字段内容。
 
 所有错误（文件不存在、格式损坏、路径越界、未知变量、SQL 语法错误）都会被转成 MCP `ToolError` 以
-干净的消息返回给客户端，不会让服务进程崩溃。
+`[错误码] 消息` 返回给客户端，例如 `[UNKNOWN_VARIABLE]`、`[ENCODING_ERROR]`、`[QUERY_FAILED]`。
 
 ## 环境要求
 
@@ -115,6 +142,8 @@
   - `pandas` >= 2.0
   - `pyreadstat` >= 1.2.8（主力读取器）
   - `duckdb` >= 1.1.0（SQL 查询）
+  - `sqlglot` >= 26.0（保守的 SQL 列来源分析）
+  - `pydantic` >= 2.0（输入与输出 schema）
 - 开发/测试依赖：`pytest`、`pytest-asyncio`
 
 ## 安装
@@ -170,6 +199,13 @@ python -m sas_local_mcp
 | `SAS_LOCAL_MCP_MAX_AGG_ROWS` | `1000` | **聚合结果**上限：`frequency` 的取值个数、`query_dataset` 的返回行数 |
 | `SAS_LOCAL_MCP_ENCODING` | 空（pyreadstat 默认） | 数据集字符编码；中文数据常需 `utf-8` 或 `gbk` |
 | `SAS_LOCAL_MCP_CACHE_SIZE` | `8` | 缓存多少个已解析数据集（按 mtime/size 失效）；`0` 关闭 |
+| `SAS_LOCAL_MCP_METADATA_CACHE_SIZE` | `512` | 独立的元数据缓存条目数，元数据与格式目录各另有 32 MiB 预算 |
+| `SAS_LOCAL_MCP_CACHE_MB` | `256` | 完整数据缓存预算，单位 MiB；超预算的单个数据集不保留 |
+| `SAS_LOCAL_MCP_CHUNK_ROWS` | `10000` | 过滤及 XPORT 计数的读取块大小 |
+| `SAS_LOCAL_MCP_MAX_RESPONSE_BYTES` | `524288` | 每份结构化 JSON 响应的 UTF-8 字节预算，协议封装另有开销 |
+| `SAS_LOCAL_MCP_SQL_MEMORY_MB` | `512` | 每个 DuckDB 连接的内存上限，禁止临时磁盘溢写；不包含 pandas 数据 |
+| `SAS_LOCAL_MCP_SQL_THREADS` | `2` | 每个 DuckDB 查询的工作线程数 |
+| `SAS_LOCAL_MCP_SQL_CONCURRENCY` | `2` | 同时执行的 SQL 工具调用数，覆盖源表读取阶段 |
 | `SAS_LOCAL_MCP_NAME` | `sas-local-mcp` | 服务名（显示在客户端） |
 
 > 两个上限分开的意义：`GROUP BY` 的基数常远超预览行数（例如 306 个受试者的 `USUBJID` 频数表）。
@@ -214,7 +250,8 @@ pip install pytest pytest-asyncio     # 或 uv sync
 pytest
 ```
 
-测试不依赖外部环境：`tests/` 下随仓库附带真实数据集（来源见下）。
+测试使用当前工作区 `tests/` 下的真实数据集（来源见下）。这些数据文件被 Git 忽略，
+仅克隆源码后需要另外准备；`tests/test_optimizations.py` 的新增用例使用受控数据及临时 XPORT。
 
 以数据目录作为 `SAS_DATA_ROOT`（由 `tests/conftest.py` 自动解析），通过内存客户端挂载本服务逐个调用全部工具，并覆盖：
 

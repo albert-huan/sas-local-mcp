@@ -24,7 +24,9 @@ MAX_FILES_TO_SCAN = 40
 async def _call(name: str, args: dict):
     async with Client(mcp) as client:
         result = await client.call_tool(name, args)
-    data = getattr(result, "data", None)
+    data = getattr(result, "structured_content", None)
+    if data is None:
+        data = getattr(result, "data", None)
     if data is None:
         data = json.loads(result.content[0].text)
     return data
@@ -464,7 +466,7 @@ async def test_read_cache_reuses_parsed_dataset(monkeypatch):
         return original(path, metadata_only)
 
     monkeypatch.setattr(ds, "_read_uncached", counting)
-    ds._CACHE.clear()
+    ds.clear_caches()
 
     await _call("get_dataset_metadata", {"path": "dm.sas7bdat"})
     after_first = len(calls)

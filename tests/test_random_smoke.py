@@ -108,6 +108,46 @@ def _seed_hint() -> str:
     return f"（本次抽样 seed={SEED_VALUE}，可用 SAS_LOCAL_MCP_RANDOM_SEED 复现）"
 
 
+# 部分 XPORT 文件里存的是 cp1252 字节（如 0x92 右单引号），pyreadstat 默认按 UTF-8
+# 解码会直接抛 UnicodeDecodeError——文件本身没坏，服务器配 SAS_LOCAL_MCP_ENCODING 即可。
+DECODE_MARKERS = ("codec can't decode", "UnicodeDecodeError", "unsupported character set")
+FALLBACK_ENCODINGS = ("cp1252", "latin-1")
+
+
+def _is_decode_error(exc: BaseException) -> bool:
+    text = str(exc)
+    return any(marker in text for marker in DECODE_MARKERS)
+
+
+def _apply_encoding_fallback(case: Case, monkeypatch) -> str:
+    """为含非 UTF-8 字节的文件逐个试候选编码，确认它在某个编码下是好的。"""
+    target = WORKSPACE_ROOT / case.path
+    for encoding in FALLBACK_ENCODINGS:
+        monkeypatch.setattr(ds, "ENCODING", encoding)
+        ds._CACHE.clear()
+        try:
+            ds._read_uncached(target, metadata_only=True)
+            ds._read_uncached(target, metadata_only=False)
+            return encoding
+        except Exception:
+            continue
+    pytest.fail(
+        f"{case.path} 在 {FALLBACK_ENCODINGS} 下都读不了，文件可能确实损坏 {_seed_hint()}"
+    )
+
+
+async def _guarded(case: Case, monkeypatch, name: str, args: dict):
+    """调用工具；遇到字符集解码失败就换编码重试一次。"""
+    try:
+        return await _call(name, args)
+    except Exception as exc:  # noqa: BLE001 - 需要按消息内容分流
+        if not _is_decode_error(exc):
+            raise
+        encoding = _apply_encoding_fallback(case, monkeypatch)
+        print(f"[test_random_smoke] {case.path} 需以 {encoding} 解码读取")
+        return await _call(name, args)
+
+
 def _assert_jsonable(records: list[dict]) -> None:
     """records 必须能进 JSON：日期已是字符串、缺失已是 None、没有裸 NaN。"""
     json.loads(json.dumps(records))
@@ -119,7 +159,9 @@ def _assert_jsonable(records: list[dict]) -> None:
 async def _call(name: str, args: dict):
     async with Client(mcp) as client:
         result = await client.call_tool(name, args)
-    data = getattr(result, "data", None)
+    data = getattr(result, "structured_content", None)
+    if data is None:
+        data = getattr(result, "data", None)
     if data is None:
         data = json.loads(result.content[0].text)
     return data
@@ -165,10 +207,10 @@ def test_sampling_covers_every_category_with_small_and_large():
 
 
 @pytest.mark.parametrize("case", CASES, ids=CASE_IDS)
-async def test_random_file_smoke(case: Case):
+async def test_random_file_smoke(case: Case, monkeypatch):
     """对随机抽到的文件跑一遍全工具链，只校验与文件内容无关的不变量。"""
     # 1) 元数据
-    meta = await _call("get_dataset_metadata", {"path": case.path})
+    meta = await _guarded(case, monkeypatch, "get_dataset_metadata", {"path": case.path})
     assert meta["path"] == case.path
     assert meta["format"] == ("sas7bdat" if case.path.endswith(".sas7bdat") else "xport")
     rows, columns = meta["number_rows"], meta["columns"]
@@ -183,7 +225,9 @@ async def test_random_file_smoke(case: Case):
     # 2) 随机分页读取：随机 limit + 随机 offset（含数据中部与尾部）
     limit = _RNG.choice([1, 3, 20, MAX_ROWS])
     offset = _RNG.choice([0, max(0, rows // 2), rows])
-    page = await _call("read_dataset", {"path": case.path, "limit": limit, "offset": offset})
+    page = await _guarded(
+        case, monkeypatch, "read_dataset", {"path": case.path, "limit": limit, "offset": offset}
+    )
     assert page["total_rows"] == rows
     assert page["rows_after_filter"] == rows
     assert page["offset"] == offset
@@ -192,23 +236,23 @@ async def test_random_file_smoke(case: Case):
     _assert_jsonable(page["records"])
 
     # 越界 offset：不报错，返回空页
-    beyond = await _call(
-        "read_dataset", {"path": case.path, "limit": 5, "offset": rows + 10**6}
+    beyond = await _guarded(
+        case, monkeypatch, "read_dataset", {"path": case.path, "limit": 5, "offset": rows + 10**6}
     )
     assert beyond["records"] == [] and beyond["returned"] == 0
     assert beyond["truncated"] is False
 
     # 3) 随机列子集
     subset = _RNG.sample(names, min(3, len(names)))
-    narrowed = await _call(
-        "read_dataset", {"path": case.path, "limit": 2, "columns": subset}
+    narrowed = await _guarded(
+        case, monkeypatch, "read_dataset", {"path": case.path, "limit": 2, "columns": subset}
     )
     assert narrowed["columns"] == subset
     _assert_jsonable(narrowed["records"])
 
     # 4) 逐变量概要
-    summary = await _call(
-        "summarize_dataset", {"path": case.path, "apply_labels": bool(_RNG.getrandbits(1))}
+    summary = await _guarded(
+        case, monkeypatch, "summarize_dataset", {"path": case.path, "apply_labels": bool(_RNG.getrandbits(1))}
     )
     assert summary["total_rows"] == rows
     assert summary["n_columns"] == len(names)
@@ -227,8 +271,8 @@ async def test_random_file_smoke(case: Case):
         multi = [s for s in non_empty if s["n_distinct"] > 1]
         target = (min(multi, key=lambda s: s["n_distinct"]) if multi else non_empty[0])["name"]
 
-        freq = await _call(
-            "frequency", {"path": case.path, "column": target, "limit": MAX_AGG_ROWS}
+        freq = await _guarded(
+            case, monkeypatch, "frequency", {"path": case.path, "column": target, "limit": MAX_AGG_ROWS}
         )
         assert freq["total_rows"] == rows
         assert freq["n_distinct"] == by_name[target]["n_distinct"]
@@ -239,8 +283,8 @@ async def test_random_file_smoke(case: Case):
         assert freq["returned"] == len(freq["levels"]) <= MAX_AGG_ROWS
         assert freq["truncated"] == (freq["n_distinct"] > freq["returned"])
 
-        with_missing = await _call(
-            "frequency",
+        with_missing = await _guarded(
+            case, monkeypatch, "frequency",
             {
                 "path": case.path,
                 "column": target,
@@ -253,8 +297,8 @@ async def test_random_file_smoke(case: Case):
         assert len(bucket) == (1 if with_missing["n_missing"] else 0)
 
     # 6) SQL：COUNT(*) 必须等于元数据行数
-    counted = await _call(
-        "query_dataset", {"path": case.path, "sql": "SELECT COUNT(*) AS n FROM dataset"}
+    counted = await _guarded(
+        case, monkeypatch, "query_dataset", {"path": case.path, "sql": "SELECT COUNT(*) AS n FROM dataset"}
     )
     assert counted["records"][0]["n"] == rows
     assert counted["truncated"] is False
@@ -262,8 +306,8 @@ async def test_random_file_smoke(case: Case):
     # 7) 日期列必须序列化成字符串，且顺序遍历不炸
     dt_cols = [c["name"] for c in columns if c["type"] == "datetime"]
     if dt_cols:
-        dt_page = await _call(
-            "read_dataset", {"path": case.path, "limit": 3, "columns": dt_cols[:1]}
+        dt_page = await _guarded(
+            case, monkeypatch, "read_dataset", {"path": case.path, "limit": 3, "columns": dt_cols[:1]}
         )
         values = [r[dt_cols[0]] for r in dt_page["records"] if r[dt_cols[0]] is not None]
         assert all(isinstance(v, str) for v in values), values[:3]

@@ -122,7 +122,9 @@ async def _call(client, name: str, args: dict) -> tuple[dict, float]:
     started = time.perf_counter()
     result = await client.call_tool(name, args)
     elapsed = (time.perf_counter() - started) * 1000
-    data = getattr(result, "data", None)
+    data = getattr(result, "structured_content", None)
+    if data is None:
+        data = getattr(result, "data", None)
     if data is None:
         data = json.loads(result.content[0].text)
     return data, elapsed
@@ -225,7 +227,7 @@ async def run_battery(client, category: str, path: Path, rng: random.Random) -> 
         k = min(len(columns), rng.randint(2, 6))
         selected = rng.sample(columns, k=k)
         read_args["columns"] = selected
-    # where 是在列投影之后用 df.query 求值的，只能引用被选中的列
+    # 过滤先于列投影；此处从已知列中构造可复现的简单条件
     if numeric_selected := [c for c in numeric if c in selected]:
         if rng.random() < 0.4:
             read_args["where"] = f"{rng.choice(numeric_selected)} >= 0"

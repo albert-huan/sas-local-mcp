@@ -65,3 +65,12 @@ def _cache_size() -> int:
 
 
 CACHE_SIZE: int = _cache_size()
+
+# Metadata entries are small and must not evict parsed data during discovery.
+METADATA_CACHE_SIZE: int = _int_env("SAS_LOCAL_MCP_METADATA_CACHE_SIZE", 512)
+CACHE_MAX_BYTES: int = _int_env("SAS_LOCAL_MCP_CACHE_MB", 256) * 1024 * 1024
+CHUNK_ROWS: int = _int_env("SAS_LOCAL_MCP_CHUNK_ROWS", 10000)
+MAX_RESPONSE_BYTES: int = _int_env("SAS_LOCAL_MCP_MAX_RESPONSE_BYTES", 512 * 1024)
+SQL_MEMORY_MB: int = _int_env("SAS_LOCAL_MCP_SQL_MEMORY_MB", 512)
+SQL_THREADS: int = _int_env("SAS_LOCAL_MCP_SQL_THREADS", 2)
+SQL_CONCURRENCY: int = _int_env("SAS_LOCAL_MCP_SQL_CONCURRENCY", 2)
