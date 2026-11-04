@@ -29,6 +29,14 @@ class ReadCache:
         with self._lock:
             return self._bytes
 
+    def peek(self, key: tuple) -> Any:
+        """Return a cached value without loading; None on a miss."""
+        with self._lock:
+            if key not in self._items:
+                return None
+            self._items.move_to_end(key)
+            return self._items[key][0]
+
     def get_or_load(
         self, key: tuple, loader: Callable[[], Any], *, capacity: int,
         max_bytes: int, weigh: Callable[[Any], int],

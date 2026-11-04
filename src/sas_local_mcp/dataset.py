@@ -30,7 +30,7 @@ from .config import (
 from .cache import ReadCache
 from .errors import DatasetError
 from .filtering import RowFilter
-from .sql_labels import inspect_query
+from .sql_labels import inspect_query, referenced_columns
 
 READABLE_SUFFIXES: dict[str, str] = {".sas7bdat": "sas7bdat", ".xpt": "xport"}
 # .sas7bcat 是格式目录文件：可被 list_datasets 发现，但没有读取器。
@@ -54,7 +54,15 @@ def resolve_dataset_path(path: str) -> Path:
         candidate = SAS_DATA_ROOT / candidate
     normalized = Path(os.path.normpath(candidate))
     if not normalized.is_relative_to(SAS_DATA_ROOT):
-        raise DatasetError(f"路径越界: {path!r} 不在 SAS_DATA_ROOT({SAS_DATA_ROOT}) 内", "PATH_OUTSIDE_ROOT")
+        # 根目录本身经过 resolve()；经由指向根目录的联接/链接写出的绝对路径
+        # 字面上不在根内，解析后落在根内即放行。
+        try:
+            resolved = normalized.resolve()
+        except (OSError, RuntimeError):
+            resolved = None
+        if resolved is None or not resolved.is_relative_to(SAS_DATA_ROOT):
+            raise DatasetError(f"路径越界: {path!r} 不在 SAS_DATA_ROOT({SAS_DATA_ROOT}) 内", "PATH_OUTSIDE_ROOT")
+        normalized = resolved
     if not normalized.is_file():
         raise DatasetError(f"文件不存在: {path!r} (相对于 {SAS_DATA_ROOT})", "FILE_NOT_FOUND")
     return normalized
@@ -156,25 +164,49 @@ _CACHE = ReadCache()
 _META_CACHE = ReadCache()
 _CATALOG_CACHE = ReadCache()
 _COUNT_CACHE = ReadCache()
-_QUERY_SLOTS = BoundedSemaphore(SQL_CONCURRENCY)
+# 整表操作（SQL、概要、频数、XPORT 过滤）共享的并发上限，防止并发整表加载撑爆内存。
+_HEAVY_SLOTS = BoundedSemaphore(SQL_CONCURRENCY)
 
 
-def _cache_key(path: Path, metadata_only: bool, catalog_path: Path | None = None) -> tuple:
+def _cache_key(path: Path, metadata_only: bool, catalog_path: Path | None = None,
+               columns: tuple[str, ...] | None = None) -> tuple:
     stat = path.stat()
     catalog = None
     if catalog_path is not None:
         cat_stat = catalog_path.stat()
         catalog = (str(catalog_path), cat_stat.st_mtime_ns, cat_stat.st_size)
-    return (str(path), stat.st_mtime_ns, stat.st_size, metadata_only, ENCODING, catalog)
+    key = (str(path), stat.st_mtime_ns, stat.st_size, metadata_only, ENCODING, catalog)
+    return key if columns is None else key + (columns,)
 
 
-def _read(path: Path, metadata_only: bool, catalog_path: Path | None = None) -> tuple[pd.DataFrame, Any]:
+def _fits_cache(path: Path) -> bool:
+    """Whether a full parse is expected to stay inside the data-cache budget."""
+    if not CACHE_SIZE:
+        return False
+    try:
+        return path.stat().st_size <= CACHE_MAX_BYTES
+    except OSError:
+        return False
+
+
+def _cached_full(path: Path, catalog_path: Path | None) -> tuple[pd.DataFrame, Any] | None:
+    """A full frame already parsed for this revision, without triggering a load."""
+    try:
+        return _CACHE.peek(_cache_key(path, False, catalog_path))
+    except OSError:
+        return None
+
+
+def _read(path: Path, metadata_only: bool, catalog_path: Path | None = None,
+          columns: tuple[str, ...] | None = None) -> tuple[pd.DataFrame, Any]:
     """Separate metadata/data caches, byte budgets, file-version checks and single-flight."""
-    key = _cache_key(path, metadata_only, catalog_path)
+    key = _cache_key(path, metadata_only, catalog_path, columns)
     def load():
-        result = (_read_uncached(path, metadata_only) if catalog_path is None
-                  else _read_uncached(path, metadata_only, catalog_path=catalog_path))
-        if key != _cache_key(path, metadata_only, catalog_path):
+        options = {} if columns is None else {"usecols": list(columns)}
+        if catalog_path is not None:
+            options["catalog_path"] = catalog_path
+        result = _read_uncached(path, metadata_only, **options)
+        if key != _cache_key(path, metadata_only, catalog_path, columns):
             raise DatasetError(f"读取期间文件发生变化: {path.name}，请重试", "FILE_CHANGED")
         return result
     cache = _META_CACHE if metadata_only else _CACHE
@@ -194,6 +226,23 @@ def clear_caches() -> None:
 def _read_with_catalog(path: Path, metadata_only: bool, catalog_path: Path | None = None):
     return (_read(path, metadata_only=metadata_only) if catalog_path is None
             else _read(path, metadata_only=metadata_only, catalog_path=catalog_path))
+
+
+def _read_data(path: Path, catalog_path: Path | None, columns: list[str] | None,
+               names: list[str]) -> tuple[pd.DataFrame, Any]:
+    """Full table when it fits the cache (reusable across calls); otherwise only `columns`.
+
+    `names` is the header's column list. Projection is only worth it when the full
+    parse would not be cached anyway, so small files keep sharing one cached frame.
+    """
+    wanted = [c for c in names if c in set(columns)] if columns is not None else names
+    if (columns is None or len(wanted) == len(names) or pyreadstat is None
+            or not path.is_file() or _fits_cache(path)):
+        return _read_with_catalog(path, False, catalog_path)
+    cached = _cached_full(path, catalog_path)
+    if cached is not None:
+        return cached
+    return _read(path, False, catalog_path, tuple(wanted or names[:1]))
 
 
 def _slices(path: Path, catalog_path: Path | None, columns: list[str] | None = None):
@@ -219,8 +268,16 @@ def _exact_row_count(path: Path, df: pd.DataFrame, meta: Any, catalog_path: Path
     def count_rows():
         if pyreadstat is None or not path.is_file():
             return len(_read_with_catalog(path, False, catalog_path)[0])
-        # Counting XPORT requires a scan, but only one column and one chunk at a time.
-        return sum(len(chunk) for chunk, _ in _slices(path, catalog_path, list(df.columns[:1])))
+        cached = _cached_full(path, catalog_path)
+        if cached is not None:
+            return len(cached[0])
+        # pyreadstat 的 XPORT row_offset 每次从头扫描，分块计数是 O(n²)；
+        # 单列一次性读取是线性的，内存也只有一列。
+        revision = _cache_key(path, False, catalog_path)
+        frame, _ = _read_uncached(path, False, usecols=list(df.columns[:1]))
+        if revision != _cache_key(path, False, catalog_path):
+            raise DatasetError(f"读取期间文件发生变化: {path.name}，请重试", "FILE_CHANGED")
+        return len(frame)
     return _COUNT_CACHE.get_or_load(
         _cache_key(path, True, catalog_path), count_rows,
         capacity=METADATA_CACHE_SIZE if CACHE_SIZE else 0, max_bytes=1024 * 1024, weigh=lambda _: 8,
@@ -302,8 +359,18 @@ def _missing_mask(series: pd.Series, meta: Any, name: str, missing_policy: str =
     if tags:
         mask = mask | series.isin(tags | {"." + tag for tag in tags})
     if missing_policy == "sas" and _column_type(meta, name, series.dtype) == "str":
-        mask = mask | series.map(lambda value: isinstance(value, str) and not value.strip(" "))
+        mask = mask | _blank_mask(series)
     return mask
+
+
+def _blank_mask(series: pd.Series) -> pd.Series:
+    """True for strings made only of spaces (SAS character missing); vectorized."""
+    try:
+        text = series.str.strip(" ")
+    except AttributeError:  # 非字符串列没有 .str 访问器
+        return pd.Series(False, index=series.index)
+    # .str 对非字符串元素返回 NaN，对应 False。
+    return text.eq("").fillna(False).astype(bool)
 
 
 def _missing_details(series: pd.Series, meta: Any, name: str, missing_policy: str) -> dict[str, int]:
@@ -316,7 +383,7 @@ def _missing_details(series: pd.Series, meta: Any, name: str, missing_policy: st
         if count:
             details["." + tag] = count
     if missing_policy == "sas" and _column_type(meta, name, series.dtype) == "str":
-        count = int(series.map(lambda value: isinstance(value, str) and not value.strip(" ")).sum())
+        count = int(_blank_mask(series).sum())
         if count:
             details["blank"] = count
     return details
@@ -392,7 +459,10 @@ def list_datasets(pattern: str | None = None, limit: int = 500, offset: int = 0)
     found: list[dict[str, Any]] = []
     for file_path in _iter_dataset_files(pattern):
         suffix = file_path.suffix.lower()
-        stat = file_path.stat()
+        try:
+            stat = file_path.stat()
+        except OSError:  # 遍历与 stat 之间被删除或无权访问
+            continue
         found.append(
             {
                 "path": _rel(file_path),
@@ -512,8 +582,18 @@ def read_rows(
         page = page.iloc[:effective]
     else:
         needed = list(dict.fromkeys(selected + sorted(predicate.columns if predicate else [])))
-        chunks = (_slices(path, catalog_path, needed) if actual_file
-                  else [_read_with_catalog(path, False, catalog_path)])
+        cached = _cached_full(path, catalog_path) if actual_file else None
+        if cached is not None:
+            chunks = [cached]
+        elif actual_file and dataset_format(path) == "xport":
+            # pyreadstat 的 XPORT row_offset 每次从文件头扫描，分块过滤是 O(n²)；
+            # 改为一次读取（能进缓存就整表，否则只读所需列）。
+            with _HEAVY_SLOTS:
+                chunks = [_read_data(path, catalog_path, needed, names)]
+        elif actual_file:
+            chunks = _slices(path, catalog_path, needed)
+        else:
+            chunks = [_read_with_catalog(path, False, catalog_path)]
         matched = scanned = 0
         pages = []
         exhausted = True
@@ -646,9 +726,25 @@ def query_dataset(
     missing_policy: str = "sas",
 ) -> dict[str, Any]:
     """Bound concurrent reads/queries as well as DuckDB's per-connection resources."""
-    with _QUERY_SLOTS:
+    with _HEAVY_SLOTS:
         return _query_dataset(path, sql, limit, offset, extra_paths, apply_labels,
                               include_total, label_sources, catalog_paths, missing_policy)
+
+
+def _strip_trailing_sql(sql: str, duckdb: Any) -> str:
+    """Drop trailing `;` and comments: duckdb 2.0 rejects `SELECT 1; -- c` once wrapped."""
+    try:
+        tokens = duckdb.tokenize(sql)
+    except Exception:
+        return sql
+    starts = [start for start, _ in tokens] + [len(sql)]
+    for index in range(len(tokens) - 1, -1, -1):
+        start, kind = tokens[index]
+        text = sql[start:starts[index + 1]].strip()
+        if "comment" in str(kind).lower() or text == ";":
+            continue
+        return sql[:starts[index + 1]].rstrip().rstrip(";").rstrip()
+    return sql
 
 
 def _query_dataset(path, sql, limit, offset, extra_paths, apply_labels,
@@ -669,14 +765,9 @@ def _query_dataset(path, sql, limit, offset, extra_paths, apply_labels,
     if len(extra_paths or []) > 15:
         raise DatasetError("一次查询最多注册 16 张表", "INVALID_ARGUMENT")
 
-    metas: dict[str, Any] = {}
-    # (表名, DataFrame, 原始路径)
-    frames: list[tuple[str, pd.DataFrame, Path]] = []
+    executable = _strip_trailing_sql(sql, duckdb)
     catalog_paths = catalog_paths or {}
-    main_df, main_meta = _read_with_catalog(path, False, catalog_paths.get("dataset"))
-    metas["dataset"] = main_meta
-    frames.append(("dataset", main_df, path))
-
+    sources_by_name: list[tuple[str, Path]] = [("dataset", path)]
     used = {"dataset"}
     for extra in extra_paths or []:
         name = _sql_identifier(extra.stem)
@@ -685,14 +776,25 @@ def _query_dataset(path, sql, limit, offset, extra_paths, apply_labels,
         while name in used:
             name = f"{name}_"
         used.add(name)
-        extra_df, extra_meta = _read_with_catalog(extra, False, catalog_paths.get(name))
-        metas[name] = extra_meta
-        frames.append((name, extra_df, extra))
-
+        sources_by_name.append((name, extra))
     if set(catalog_paths) - used:
         raise DatasetError(f"catalog_paths 含未知表名: {sorted(set(catalog_paths) - used)}", "INVALID_CATALOG")
-    table_columns = {name: list(frame.columns) for name, frame, _ in frames}
-    automatic_sources, ordered = inspect_query(sql, table_columns)
+
+    # 先读表头（走元数据缓存），据此只加载 SQL 实际引用的列。
+    table_columns = {name: [str(c) for c in _read_with_catalog(source, True, catalog_paths.get(name))[0].columns]
+                     for name, source in sources_by_name}
+    explicit = {str(v) for origin in (label_sources or {}).values() for v in origin.values()}
+    needed = referenced_columns(executable, table_columns, explicit | set(label_sources or {}))
+
+    metas: dict[str, Any] = {}
+    # (表名, DataFrame, 原始路径)
+    frames: list[tuple[str, pd.DataFrame, Path]] = []
+    for name, source in sources_by_name:
+        frame, meta = _read_data(source, catalog_paths.get(name),
+                                 needed.get(name) if needed else None, table_columns[name])
+        metas[name] = meta
+        frames.append((name, frame, source))
+    automatic_sources, ordered = inspect_query(executable, table_columns)
     effective = max(1, min(int(limit), MAX_AGG_ROWS))
     start = max(0, int(offset))
 
@@ -703,10 +805,17 @@ def _query_dataset(path, sql, limit, offset, extra_paths, apply_labels,
                                      "threads": str(SQL_THREADS), "max_temp_directory_size": "0B"})
         for name, frame, _ in frames:
             con.register(name, _sql_frame(frame, metas[name], missing_policy))
-        relation = con.sql(sql)
+        relation = con.sql(executable)
         # Fetch at most a page and a sentinel; no full result DataFrame is created.
         result = relation.limit(effective + 1, offset=start).fetchdf()
-        total_rows = int(relation.aggregate("count(*) AS n").fetchone()[0]) if include_total else None
+        total_rows = None
+        if include_total:
+            if len(result) <= effective and (len(result) or not start):
+                # 页面已读到结果末尾，总数可直接推出，免去第二次执行整条 SQL。
+                total_rows = start + len(result)
+            else:
+                # Relation 不保存结果（duckdb 2.0 起已无 fetchone）；计数会重新执行查询。
+                total_rows = int(relation.aggregate("count(*) AS n").fetchall()[0][0])
     except Exception as exc:
         code = "QUERY_RESOURCE_LIMIT" if isinstance(exc, duckdb.OutOfMemoryException) else "QUERY_FAILED"
         raise DatasetError(f"SQL 执行失败: {exc}", code) from exc
@@ -813,6 +922,9 @@ def search_variables(
             df, meta = _read(file_path, metadata_only=True)
         except DatasetError as exc:
             errors.append({"path": _rel(file_path), "error": str(exc)})
+            continue
+        except OSError as exc:
+            errors.append({"path": _rel(file_path), "error": f"文件访问失败: {exc}"})
             continue
         names = [str(c) for c in df.columns]
         if contains:
@@ -950,12 +1062,8 @@ def summarize_dataset(
         raise DatasetError("stats_mode 必须为 full 或 counts", "INVALID_ARGUMENT")
     if missing_policy not in {"sas", "pandas"}:
         raise DatasetError("missing_policy 必须为 sas 或 pandas", "INVALID_ARGUMENT")
-    df, meta = _read_with_catalog(path, False, catalog_path)
-    total_rows = int(len(df))
-    label_lookup = _label_lookup(meta, df)
-    value_labels = getattr(meta, "variable_value_labels", None) or {}
-
-    names = [str(c) for c in df.columns]
+    header, _ = _read_with_catalog(path, True, catalog_path)
+    names = [str(c) for c in header.columns]
     if columns:
         missing = [str(c) for c in columns if str(c) not in names]
         if missing:
@@ -964,8 +1072,20 @@ def summarize_dataset(
 
     start = max(0, int(offset))
     effective = max(1, min(int(limit), MAX_AGG_ROWS))
+    page_names = names[start:start + effective]
+    with _HEAVY_SLOTS:
+        df, meta = _read_data(path, catalog_path, page_names, [str(c) for c in header.columns])
+        return _summarize_page(path, df, meta, names, page_names, start, apply_labels=apply_labels,
+                               catalog_path=catalog_path, missing_policy=missing_policy, stats_mode=stats_mode)
+
+
+def _summarize_page(path, df, meta, names, page_names, start, *, apply_labels, catalog_path,
+                    missing_policy, stats_mode) -> dict[str, Any]:
+    total_rows = int(len(df))
+    label_lookup = _label_lookup(meta, df)
+    value_labels = getattr(meta, "variable_value_labels", None) or {}
     summaries: list[dict[str, Any]] = []
-    for name in names[start:start + effective]:
+    for name in page_names:
         series = df[name]
         mask = _missing_mask(series, meta, name, missing_policy)
         n_missing = int(mask.sum())
@@ -1027,10 +1147,20 @@ def frequency(
     分母随 include_missing 变化：包含缺失时按总行数，否则按非缺失行数，
     结果里回传 denominator 让调用方明确百分比基准。
     """
-    df, meta = _read_with_catalog(path, False, catalog_path)
-    if column not in df.columns:
+    header, _ = _read_with_catalog(path, True, catalog_path)
+    if column not in header.columns:
         raise DatasetError(f"未知变量: {column}；可用变量见 get_dataset_metadata", "UNKNOWN_VARIABLE")
+    if missing_policy not in {"sas", "pandas"}:
+        raise DatasetError("missing_policy 必须为 sas 或 pandas", "INVALID_ARGUMENT")
+    with _HEAVY_SLOTS:
+        df, meta = _read_data(path, catalog_path, [column], [str(c) for c in header.columns])
+        return _frequency_page(path, df, meta, column, limit=limit, offset=offset, apply_labels=apply_labels,
+                               include_missing=include_missing, catalog_path=catalog_path,
+                               missing_policy=missing_policy)
 
+
+def _frequency_page(path, df, meta, column, *, limit, offset, apply_labels, include_missing,
+                    catalog_path, missing_policy) -> dict[str, Any]:
     total_rows = int(len(df))
     series = df[column]
     mapping = _norm_labels((getattr(meta, "variable_value_labels", None) or {}).get(column))

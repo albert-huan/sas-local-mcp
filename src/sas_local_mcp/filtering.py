@@ -31,6 +31,14 @@ class RowFilter:
                        ast.In, ast.NotIn, ast.Is, ast.IsNot, *tuple(_COMPARE), *tuple(_ARITHMETIC))
             if any(not isinstance(node, allowed) for node in nodes):
                 raise ValueError("仅支持比较、算术、in/not in 和布尔组合；不允许函数调用或属性访问")
+            # Python 的 `x in Series` 检查的是索引而不是值，会静默给出错误结果。
+            for node in nodes:
+                if isinstance(node, ast.Compare):
+                    for op, comparator in zip(node.ops, node.comparators):
+                        if isinstance(op, (ast.In, ast.NotIn)) and not (
+                                isinstance(comparator, (ast.List, ast.Tuple))
+                                and not any(isinstance(n, ast.Name) for n in ast.walk(comparator))):
+                            raise ValueError("in/not in 右侧必须是常量列表，如 SEX in ['F', 'M']")
             self.columns = {node.id for node in nodes if isinstance(node, ast.Name)}
             missing = self.columns - set(columns)
             if missing:

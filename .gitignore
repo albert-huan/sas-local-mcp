@@ -38,3 +38,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# SAS 运行产物
+*.lst

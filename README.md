@@ -201,17 +201,19 @@ python -m sas_local_mcp
 | `SAS_LOCAL_MCP_CACHE_SIZE` | `8` | 缓存多少个已解析数据集（按 mtime/size 失效）；`0` 关闭 |
 | `SAS_LOCAL_MCP_METADATA_CACHE_SIZE` | `512` | 独立的元数据缓存条目数，元数据与格式目录各另有 32 MiB 预算 |
 | `SAS_LOCAL_MCP_CACHE_MB` | `256` | 完整数据缓存预算，单位 MiB；超预算的单个数据集不保留 |
-| `SAS_LOCAL_MCP_CHUNK_ROWS` | `10000` | 过滤及 XPORT 计数的读取块大小 |
+| `SAS_LOCAL_MCP_CHUNK_ROWS` | `10000` | sas7bdat 带 `where` 过滤时的读取块大小（XPORT 一次读取，不分块） |
 | `SAS_LOCAL_MCP_MAX_RESPONSE_BYTES` | `524288` | 每份结构化 JSON 响应的 UTF-8 字节预算，协议封装另有开销 |
 | `SAS_LOCAL_MCP_SQL_MEMORY_MB` | `512` | 每个 DuckDB 连接的内存上限，禁止临时磁盘溢写；不包含 pandas 数据 |
 | `SAS_LOCAL_MCP_SQL_THREADS` | `2` | 每个 DuckDB 查询的工作线程数 |
-| `SAS_LOCAL_MCP_SQL_CONCURRENCY` | `2` | 同时执行的 SQL 工具调用数，覆盖源表读取阶段 |
+| `SAS_LOCAL_MCP_SQL_CONCURRENCY` | `2` | 同时执行的整表操作数：SQL、`summarize_dataset`、`frequency` 及 XPORT 过滤读取共用此上限 |
 | `SAS_LOCAL_MCP_NAME` | `sas-local-mcp` | 服务名（显示在客户端） |
 
 > 两个上限分开的意义：`GROUP BY` 的基数常远超预览行数（例如 306 个受试者的 `USUBJID` 频数表）。
 > 若聚合也被 200 行截断，模型会读到不完整的分布并可能得出错误结论。
 >
-> `SAS_DATA_ROOT` 支持 `~` 家目录展开；未设置时退化为启动进程的当前目录。
+> `SAS_DATA_ROOT` 支持 `~` 家目录展开；未设置时退化为启动进程的当前目录，启动时会在 stderr 打印警告。
+>
+> 超出 `SAS_LOCAL_MCP_CACHE_MB` 的大文件不整表读入：`frequency`、`summarize_dataset` 和 `query_dataset` 只读取用到的列（SQL 中出现 `*`、`COLUMNS()`、NATURAL JOIN、PIVOT 时仍读取全部列）。
 
 ## MCP 客户端配置示例
 
