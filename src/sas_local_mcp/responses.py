@@ -53,6 +53,7 @@ class Metadata(Response):
     number_columns: int
     file_label: str
     file_encoding: str | None
+    encoding_fallback: str | None = None
     created: str | None
     modified: str | None
     user_missing: dict[str, list[Any]]
@@ -80,6 +81,7 @@ class Rows(Response):
     decoded_columns: list[str]
     missing_policy: Literal["sas", "pandas"]
     catalog_path: str | None
+    encoding_fallback: str | None = None
 
 
 class VariableSummary(BaseModel):
@@ -109,6 +111,7 @@ class Summary(Response):
     stats_mode: Literal["full", "counts"]
     missing_policy: Literal["sas", "pandas"]
     catalog_path: str | None
+    encoding_fallback: str | None = None
 
 
 class Level(BaseModel):
@@ -138,6 +141,7 @@ class Frequencies(Response):
     missing_details: dict[str, int]
     missing_policy: Literal["sas", "pandas"]
     catalog_path: str | None
+    encoding_fallback: str | None = None
 
 
 class ValueLabels(Response):
@@ -145,6 +149,7 @@ class ValueLabels(Response):
     format: str
     variables: dict[str, dict[str, str]]
     catalog_path: str | None
+    encoding_fallback: str | None = None
 
 
 class LabelSource(BaseModel):
@@ -178,6 +183,7 @@ class Query(Response):
     warnings: list[str]
     missing_policy: Literal["sas", "pandas"]
     special_missing_values: dict[str, dict[str, list[str]]]
+    encoding_fallback: dict[str, str] = Field(default_factory=dict)
 
 
 class Match(BaseModel):

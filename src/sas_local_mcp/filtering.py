@@ -39,6 +39,14 @@ class RowFilter:
                                 isinstance(comparator, (ast.List, ast.Tuple))
                                 and not any(isinstance(n, ast.Name) for n in ast.walk(comparator))):
                             raise ValueError("in/not in 右侧必须是常量列表，如 SEX in ['F', 'M']")
+            # `x == None` 在 pandas 里恒为 False，会静默返回 0 行；强制改用 is None。
+            for node in nodes:
+                if isinstance(node, ast.Compare):
+                    operands = [node.left, *node.comparators]
+                    for op, left, right in zip(node.ops, operands, operands[1:]):
+                        if isinstance(op, (ast.Eq, ast.NotEq)) and any(
+                                isinstance(side, ast.Constant) and side.value is None for side in (left, right)):
+                            raise ValueError("缺失值判断请使用 `is None` / `is not None`，不要用 `== None` / `!= None`")
             self.columns = {node.id for node in nodes if isinstance(node, ast.Name)}
             missing = self.columns - set(columns)
             if missing:

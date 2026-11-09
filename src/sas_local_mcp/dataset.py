@@ -6,14 +6,17 @@ pyreadstat 不可用时回退 pandas.read_sas。
 
 from __future__ import annotations
 
+import codecs
 import contextlib
+import contextvars
 import copy
+import functools
 import math
 import os
 import re
 from datetime import date, datetime, time
 from pathlib import Path
-from threading import BoundedSemaphore
+from threading import BoundedSemaphore, Lock
 from typing import Any
 
 import pandas as pd
@@ -24,7 +27,7 @@ except ImportError:  # pragma: no cover
     pyreadstat = None
 
 from .config import (
-    CACHE_SIZE, CACHE_MAX_BYTES, CHUNK_ROWS, ENCODING, MAX_AGG_ROWS, MAX_ROWS,
+    CACHE_SIZE, CACHE_MAX_BYTES, CHUNK_ROWS, ENCODING, ENCODING_FALLBACKS, MAX_AGG_ROWS, MAX_ROWS,
     METADATA_CACHE_SIZE, SAS_DATA_ROOT, SQL_CONCURRENCY, SQL_MEMORY_MB, SQL_THREADS,
 )
 from .cache import ReadCache
@@ -79,20 +82,131 @@ def _rel(path: Path) -> str:
         return str(path)
 
 
-def _call_reader(reader: Any, path: Path, metadata_only: bool, **options) -> tuple[pd.DataFrame, Any]:
+# 单次调用显式指定的编码（工具的 encoding 参数）；优先于全局 SAS_LOCAL_MCP_ENCODING。
+_CALL_ENCODING: contextvars.ContextVar[str | None] = contextvars.ContextVar("sas_call_encoding", default=None)
+# 自动回退成功后记住「文件版本 -> 实际编码」，之后对同一版本的读取直接用它，不再重复试错。
+_ENCODING_MEMO: dict[tuple, str] = {}
+_ENCODING_MEMO_LIMIT = 512
+_ENCODING_LOCK = Lock()
+
+
+def _explicit_encoding() -> str | None:
+    return _CALL_ENCODING.get() or ENCODING
+
+
+def _normalize_encoding(encoding: str | None) -> str | None:
+    name = (encoding or "").strip()
+    if not name:
+        return None
+    try:
+        return codecs.lookup(name).name
+    except LookupError as exc:
+        raise DatasetError(f"未知编码: {encoding!r}（如 utf-8 / gb18030 / cp1252 / latin1）", "INVALID_ARGUMENT") from exc
+
+
+def _with_encoding(fn):
+    """Let a public read function take `encoding=`; it applies to every read made inside the call."""
+    @functools.wraps(fn)
+    def wrapper(*args, encoding: str | None = None, **kwargs):
+        token = _CALL_ENCODING.set(_normalize_encoding(encoding))
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _CALL_ENCODING.reset(token)
+    return wrapper
+
+
+def _memo_key(path: Path) -> tuple | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (str(path), stat.st_mtime_ns, stat.st_size)
+
+
+def _remember_encoding(path: Path, encoding: str) -> None:
+    key = _memo_key(path)
+    if key is None:
+        return
+    with _ENCODING_LOCK:
+        for old in [k for k in _ENCODING_MEMO if k[0] == key[0] and k != key]:
+            _ENCODING_MEMO.pop(old, None)
+        while len(_ENCODING_MEMO) >= _ENCODING_MEMO_LIMIT:
+            _ENCODING_MEMO.pop(next(iter(_ENCODING_MEMO)), None)
+        _ENCODING_MEMO[key] = encoding
+
+
+def _remembered_encoding(path: Path) -> str | None:
+    key = _memo_key(path)
+    with _ENCODING_LOCK:
+        return _ENCODING_MEMO.get(key) if key else None
+
+
+def _is_encoding_error(exc: BaseException) -> bool:
+    return isinstance(exc, UnicodeError) or any(marker in str(exc).lower() for marker in (
+        "codec can't decode", "unable to convert string", "unsupported character set"))
+
+
+def encoding_fallback_of(meta: Any) -> str | None:
+    """The fallback encoding that actually decoded this data, or None for the default/explicit one."""
+    return getattr(meta, "encoding_fallback", None) if meta is not None else None
+
+
+def _call_reader(reader: Any, path: Path, metadata_only: bool, encoding: str | None = None,
+                 **options) -> tuple[pd.DataFrame, Any]:
     """Read raw codes; labels are attached independently and applied only to a page."""
     kwargs: dict[str, Any] = dict(options)
-    if ENCODING:
-        kwargs["encoding"] = ENCODING
+    if encoding:
+        kwargs["encoding"] = encoding
     if dataset_format(path) == "sas7bdat":
         kwargs["user_missing"] = True
     return reader(str(path), metadataonly=metadata_only, **kwargs)
+
+
+def _read_decoded(reader: Any, path: Path, metadata_only: bool, **options) -> tuple[pd.DataFrame, Any]:
+    """Explicit encoding is used as given. Otherwise try the default, then the fallbacks.
+
+    The encoding that finally worked is remembered per file revision and reported on `meta`.
+    """
+    explicit = _explicit_encoding()
+    if explicit:
+        return _call_reader(reader, path, metadata_only, explicit, **options)
+    remembered = _remembered_encoding(path)
+    attempts = [remembered] if remembered else [None, *ENCODING_FALLBACKS]
+    for index, encoding in enumerate(attempts):
+        try:
+            frame, meta = _call_reader(reader, path, metadata_only, encoding, **options)
+        except Exception as exc:
+            if _is_encoding_error(exc) and index + 1 < len(attempts):
+                continue
+            raise
+        if encoding is not None:
+            _remember_encoding(path, encoding)
+            if meta is not None:
+                meta.encoding_fallback = encoding
+        return frame, meta
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _formats(meta: Any) -> dict:
     # pyreadstat calls SAS formats original_variable_types; accept legacy/test meta too.
     return {**(getattr(meta, "original_variable_types", None) or {}),
             **(getattr(meta, "original_variable_formats", None) or {})}
+
+
+def _catalog_match(catalog_labels: dict, fmt: str) -> Any:
+    """Exact format name wins; only then fall back to `NAME<width>[.<decimals>]`.
+
+    Otherwise a catalog holding both ARM and ARM2 would let ARM claim `ARM2.` as width 2.
+    """
+    wanted = fmt.rstrip(".").upper()
+    for name, mapping in catalog_labels.items():
+        if str(name).rstrip(".").upper() == wanted:
+            return mapping
+    for name, mapping in catalog_labels.items():
+        if re.fullmatch(re.escape(str(name).rstrip(".")) + r"\d+(?:\.\d*)?\.?", fmt, re.IGNORECASE):
+            return mapping
+    return None
 
 
 def _attach_catalog(result: tuple[pd.DataFrame, Any], catalog_path: Path | None):
@@ -104,7 +218,7 @@ def _attach_catalog(result: tuple[pd.DataFrame, Any], catalog_path: Path | None)
         raise DatasetError("格式目录需要 pyreadstat", "INVALID_CATALOG")
     key = _cache_key(catalog_path, True)
     def load():
-        kwargs = {"encoding": ENCODING} if ENCODING else {}
+        kwargs = {"encoding": _explicit_encoding()} if _explicit_encoding() else {}
         _, catalog = pyreadstat.read_sas7bcat(str(catalog_path), **kwargs)
         return catalog
     catalog = _CATALOG_CACHE.get_or_load(
@@ -117,8 +231,7 @@ def _attach_catalog(result: tuple[pd.DataFrame, Any], catalog_path: Path | None)
     catalog_labels = getattr(catalog, "value_labels", None) or {}
     variable_formats = {**_formats(meta), **(getattr(meta, "variable_to_label", None) or {})}
     for variable, fmt in variable_formats.items():
-        match = next((mapping for name, mapping in catalog_labels.items()
-                      if re.fullmatch(re.escape(str(name).rstrip(".")) + r"(?:\d+(?:\.\d+)?)?\.?", str(fmt), re.IGNORECASE)), None)
+        match = _catalog_match(catalog_labels, str(fmt))
         if match is not None:
             labels[variable] = dict(match)
     meta.variable_value_labels = labels
@@ -135,19 +248,19 @@ def _read_uncached(path: Path, metadata_only: bool, catalog_path: Path | None = 
     if pyreadstat is not None:
         reader = pyreadstat.read_sas7bdat if fmt == "sas7bdat" else pyreadstat.read_xport
         try:
-            return _attach_catalog(_call_reader(reader, path, metadata_only, **options), catalog_path)
+            return _attach_catalog(_read_decoded(reader, path, metadata_only, **options), catalog_path)
         except DatasetError:
             raise
         except Exception as exc:
-            encoding_error = isinstance(exc, UnicodeError) or any(marker in str(exc).lower() for marker in (
-                "codec can't decode", "unable to convert string", "unsupported character set"))
+            encoding_error = _is_encoding_error(exc)
+            hint = "；可用 encoding 参数指定，如 gb18030 / cp1252 / latin1" if encoding_error else ""
             raise DatasetError(
-                f"读取 {path.name} 失败: {exc}（文件可能损坏、截断、编码不匹配或版本不受支持）",
+                f"读取 {path.name} 失败: {exc}（文件可能损坏、截断、编码不匹配或版本不受支持{hint}）",
                 "ENCODING_ERROR" if encoding_error else "READ_FAILED",
             ) from exc
     # pandas 回退：只支持全量读取，无 meta 信息。
     try:
-        kwargs = {"encoding": ENCODING} if ENCODING else {}
+        kwargs = {"encoding": _explicit_encoding()} if _explicit_encoding() else {}
         if catalog_path:
             raise DatasetError("格式目录需要 pyreadstat", "INVALID_CATALOG")
         frame = pd.read_sas(str(path), format=fmt, **kwargs)
@@ -175,18 +288,45 @@ def _cache_key(path: Path, metadata_only: bool, catalog_path: Path | None = None
     if catalog_path is not None:
         cat_stat = catalog_path.stat()
         catalog = (str(catalog_path), cat_stat.st_mtime_ns, cat_stat.st_size)
-    key = (str(path), stat.st_mtime_ns, stat.st_size, metadata_only, ENCODING, catalog)
+    key = (str(path), stat.st_mtime_ns, stat.st_size, metadata_only, _explicit_encoding(), catalog)
     return key if columns is None else key + (columns,)
 
 
+# 整表解析后实测超出缓存预算的文件版本。磁盘体积只是下限：压缩或字符列多的数据集
+# 解析后常是磁盘大小的数倍，所以一旦观察到真实占用，就以它为准，不再按磁盘大小猜。
+_OVERSIZE: dict[tuple, int] = {}
+_OVERSIZE_LIMIT = 512
+_OVERSIZE_LOCK = Lock()
+
+
+def _note_full_parse_weight(path: Path, revision: tuple, weight: int) -> None:
+    with _OVERSIZE_LOCK:
+        if weight <= CACHE_MAX_BYTES:
+            _OVERSIZE.pop(revision, None)
+            return
+        for old in [k for k in _OVERSIZE if k[0] == revision[0] and k != revision]:
+            _OVERSIZE.pop(old, None)
+        while len(_OVERSIZE) >= _OVERSIZE_LIMIT:
+            _OVERSIZE.pop(next(iter(_OVERSIZE)), None)
+        _OVERSIZE[revision] = weight
+
+
 def _fits_cache(path: Path) -> bool:
-    """Whether a full parse is expected to stay inside the data-cache budget."""
+    """Whether a full parse is expected to stay inside the data-cache budget.
+
+    Observed in-memory size wins; the on-disk size is only a first guess for files
+    that have never been fully parsed.
+    """
     if not CACHE_SIZE:
         return False
     try:
-        return path.stat().st_size <= CACHE_MAX_BYTES
+        stat = path.stat()
     except OSError:
         return False
+    with _OVERSIZE_LOCK:
+        if (str(path), stat.st_mtime_ns, stat.st_size) in _OVERSIZE:
+            return False
+    return stat.st_size <= CACHE_MAX_BYTES
 
 
 def _cached_full(path: Path, catalog_path: Path | None) -> tuple[pd.DataFrame, Any] | None:
@@ -210,15 +350,25 @@ def _read(path: Path, metadata_only: bool, catalog_path: Path | None = None,
             raise DatasetError(f"读取期间文件发生变化: {path.name}，请重试", "FILE_CHANGED")
         return result
     cache = _META_CACHE if metadata_only else _CACHE
+
+    def weigh(result):
+        weight = (int(result[0].memory_usage(index=True, deep=True).sum())
+                  + len(repr(vars(result[1]) if result[1] is not None else {}).encode("utf-8")))
+        if not metadata_only and columns is None:
+            _note_full_parse_weight(path, key[:3], weight)
+        return weight
+
     return cache.get_or_load(
         key, load, capacity=(METADATA_CACHE_SIZE if metadata_only else CACHE_SIZE) if CACHE_SIZE else 0,
-        max_bytes=32 * 1024 * 1024 if metadata_only else CACHE_MAX_BYTES,
-        weigh=lambda result: int(result[0].memory_usage(index=True, deep=True).sum())
-        + len(repr(vars(result[1]) if result[1] is not None else {}).encode("utf-8")),
+        max_bytes=32 * 1024 * 1024 if metadata_only else CACHE_MAX_BYTES, weigh=weigh,
     )
 
 
 def clear_caches() -> None:
+    with _ENCODING_LOCK:
+        _ENCODING_MEMO.clear()
+    with _OVERSIZE_LOCK:
+        _OVERSIZE.clear()
     for cache in (_CACHE, _META_CACHE, _CATALOG_CACHE, _COUNT_CACHE):
         cache.clear()
 
@@ -330,9 +480,15 @@ def _column_type(meta: Any, name: str, dtype: Any) -> str:
 
 def _temporal_kind(text: str) -> str | None:
     tokens = text.upper().split()
-    datetime_formats = ("DATETIME", "DATEAMPM", "MDYAMPM", "E8601DT", "E8601DZ", "B8601DT", "B8601DZ", "NLDATM", "ANYDTDTM", "DTDATE", "DTMONYY", "DTWKDAT", "DTYEAR")
-    time_formats = ("TIME", "HHMM", "HOUR", "MMSS", "E8601TM", "E8601TZ", "B8601TM", "B8601TZ", "ANYDTTME", "NLTIME")
-    date_formats = ("DATE", "YYMM", "MMDD", "DDMM", "MMYY", "JULIAN", "JULDAY", "MONYY", "YYMON", "WORDDATE", "WEEKDATE", "E8601DA", "B8601DA", "ANYDTDTE", "NLDATE")
+    # 与 pyreadstat 转成 date/datetime/time 对象的格式清单保持一致。
+    datetime_formats = ("DATETIME", "DATEAMPM", "MDYAMPM", "E8601DT", "E8601DZ", "B8601DT", "B8601DZ", "B8601DN",
+                        "IS8601DT", "IS8601DZ", "NLDATM", "ANYDTDTM", "DTDATE", "DTMONYY", "DTWKDAT", "DTYEAR")
+    time_formats = ("TIME", "TIMEAMPM", "TOD", "HHMM", "HOUR", "MMSS", "E8601TM", "E8601TZ", "B8601TM", "B8601TZ",
+                    "IS8601TM", "IS8601TZ", "ANYDTTME", "NLTIME")
+    date_formats = ("DATE", "YYMM", "MMDD", "DDMM", "MMYY", "JULIAN", "JULDAY", "MONYY", "YYMON", "WORDDATE",
+                    "WEEKDATE", "WEEKDATX", "E8601DA", "B8601DA", "IS8601DA", "ANYDTDTE", "NLDATE")
+    # YYMMDD / MMDDYY / DDMMYY 另有分隔符变体：B(空格) C(冒号) D(短横线) N(无分隔) P(点) S(斜杠)。
+    date_formats += tuple(base + suffix for base in ("YYMMDD", "MMDDYY", "DDMMYY") for suffix in ("", *"BCDNPS"))
     for kind, formats in (("datetime", datetime_formats), ("time", time_formats), ("date", date_formats)):
         if any(re.fullmatch(re.escape(fmt) + r"\d*(?:\.\d*)?", token) for token in tokens for fmt in formats):
             return kind
@@ -488,6 +644,7 @@ def list_datasets(pattern: str | None = None, limit: int = 500, offset: int = 0)
     }
 
 
+@_with_encoding
 def read_metadata(path: Path, *, catalog_path: Path | None = None, include_row_count: bool = True,
                   column_offset: int = 0, column_limit: int = 500) -> dict[str, Any]:
     """元数据与变量分页；XPORT 精确行数按块数一列，可跳过计数返回 None。"""
@@ -525,6 +682,7 @@ def read_metadata(path: Path, *, catalog_path: Path | None = None, include_row_c
         "number_columns": len(df.columns),
         "file_label": _meta_scalar(meta, "file_label", ""),
         "file_encoding": _meta_scalar(meta, "file_encoding", None),
+        "encoding_fallback": encoding_fallback_of(meta),
         "created": _jsonable(_meta_scalar(meta, "creation_time", None)),
         "modified": _jsonable(_meta_scalar(meta, "modification_time", None)),
         "user_missing": {str(k): v for k, v in user_missing.items()},
@@ -537,6 +695,7 @@ def read_metadata(path: Path, *, catalog_path: Path | None = None, include_row_c
     }
 
 
+@_with_encoding
 def read_rows(
     path: Path,
     *,
@@ -604,6 +763,8 @@ def read_rows(
                 for name, values in (getattr(chunk_meta, "missing_user_values", None) or {}).items():
                     tags[name] = sorted(set(tags.get(name, [])) | set(values))
                 meta.missing_user_values = tags
+                if encoding_fallback_of(chunk_meta):
+                    meta.encoding_fallback = chunk_meta.encoding_fallback
             scanned += len(chunk)
             if predicate:
                 filter_data = chunk.copy()
@@ -660,6 +821,7 @@ def read_rows(
         "decoded_columns": decoded,
         "missing_policy": missing_policy,
         "catalog_path": _rel(catalog_path) if catalog_path else None,
+        "encoding_fallback": encoding_fallback_of(meta),
     }, decoding_masks)
 
 
@@ -669,6 +831,7 @@ def _label_key(value: Any) -> str:
     return str(value)
 
 
+@_with_encoding
 def get_value_labels(path: Path, *, catalog_path: Path | None = None,
                      columns: list[str] | None = None) -> dict[str, Any]:
     """变量的 SAS 格式值标签映射（QC 解码 coded 值用）。"""
@@ -685,6 +848,7 @@ def get_value_labels(path: Path, *, catalog_path: Path | None = None,
         "format": dataset_format(path),
         "variables": variables,
         "catalog_path": _rel(catalog_path) if catalog_path else None,
+        "encoding_fallback": encoding_fallback_of(meta),
     }
 
 
@@ -712,6 +876,7 @@ def _sql_frame(frame: pd.DataFrame, meta: Any, missing_policy: str) -> pd.DataFr
     return result
 
 
+@_with_encoding
 def query_dataset(
     path: Path,
     sql: str,
@@ -877,12 +1042,14 @@ def _query_dataset(path, sql, limit, offset, extra_paths, apply_labels,
         "order_by_present": ordered,
         "warnings": warnings,
         "missing_policy": missing_policy,
+        "encoding_fallback": {name: used for name, meta in metas.items() if (used := encoding_fallback_of(meta))},
         "special_missing_values": {name: {str(var): ["." + tag for tag in sorted(_special_tags(meta, str(var)))]
                                    for var in (getattr(meta, "missing_user_values", None) or {})}
                                    for name, meta in metas.items()},
     }, decoding_masks)
 
 
+@_with_encoding
 def search_variables(
     variable: str,
     pattern: str | None = None,
@@ -1042,6 +1209,7 @@ def _label_lookup(meta: Any, df: pd.DataFrame) -> dict[str, str]:
     }
 
 
+@_with_encoding
 def summarize_dataset(
     path: Path,
     *,
@@ -1127,9 +1295,11 @@ def _summarize_page(path, df, meta, names, page_names, start, *, apply_labels, c
         "stats_mode": stats_mode,
         "missing_policy": missing_policy,
         "catalog_path": _rel(catalog_path) if catalog_path else None,
+        "encoding_fallback": encoding_fallback_of(meta),
     }
 
 
+@_with_encoding
 def frequency(
     path: Path,
     column: str,
@@ -1208,4 +1378,5 @@ def _frequency_page(path, df, meta, column, *, limit, offset, apply_labels, incl
         "missing_details": _missing_details(series, meta, column, missing_policy),
         "missing_policy": missing_policy,
         "catalog_path": _rel(catalog_path) if catalog_path else None,
+        "encoding_fallback": encoding_fallback_of(meta),
     }

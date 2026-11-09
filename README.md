@@ -61,12 +61,17 @@
 - **`list_datasets(pattern?, limit=500, offset=0)`**
   - 返回 `{ root, count, datasets: [{ path, name, format, size_bytes, modified }] }`。
   - `count` 为完整目录计数，`returned` 为当前页条数，按 `next_offset` 继续获取。
+> **字符编码（除 `list_datasets` 外的 7 个工具通用）**：都可选传 `encoding`（如 `gb18030` / `cp1252` / `latin1`），只对本次调用生效。
+> 不传时先按默认（或 `SAS_LOCAL_MCP_ENCODING`）解码，失败再按 `SAS_LOCAL_MCP_ENCODING_FALLBACKS` 依次回退，
+> 成功的编码记在文件版本上供后续读取复用，并在返回的 `encoding_fallback` 里给出（`query_dataset` 为 表名 -> 编码 的映射）。
+> 显式指定的编码解码失败时直接报 `ENCODING_ERROR`，不会静默回退。
+
 - **`get_dataset_metadata(path)`**
   - 返回 `{ number_rows, number_columns, file_label, created, modified, columns: [{ name, label, type, format, informat }] }`。
   - `type` 的日期判定同时看 `informat` 与 `format`（SAS 日期列常只带 format，如 `DATE9.`）。
   - **`.xpt` 需要额外计数**：pyreadstat 对 XPORT 的 metadata-only 读取不返回行数
     （`meta.number_rows` 为 `None`、df 为空），直接采信会把 6 万行的数据集报成 0 行。
-    此时本工具分块读取一列计数，只缓存计数；`include_row_count=False` 可跳过扫描，未知行数返回 `null`。
+    此时本工具单列一次性读取并计数（分块读取对 XPORT 是 O(n²)），只缓存计数；`include_row_count=False` 可跳过扫描，未知行数返回 `null`。
   - 新增 `logical_type`（date/time/datetime/string/numeric）、`sas_unit` 和存储宽度；
     变量元数据支持 `column_offset` / `column_limit` 分页。
 - **`summarize_dataset(path, columns?, apply_labels=False)`**
@@ -197,7 +202,8 @@ python -m sas_local_mcp
 | `SAS_DATA_ROOT` | 进程当前工作目录（CWD） | 数据根目录，所有数据集路径必须落在其内（沙箱边界） |
 | `SAS_LOCAL_MCP_MAX_ROWS` | `200` | **行预览**上限：`read_dataset` 一次最多返回多少条原始记录 |
 | `SAS_LOCAL_MCP_MAX_AGG_ROWS` | `1000` | **聚合结果**上限：`frequency` 的取值个数、`query_dataset` 的返回行数 |
-| `SAS_LOCAL_MCP_ENCODING` | 空（pyreadstat 默认） | 数据集字符编码；中文数据常需 `utf-8` 或 `gbk` |
+| `SAS_LOCAL_MCP_ENCODING` | 空（pyreadstat 默认） | 全局固定的字符编码；中文数据常需 `utf-8` 或 `gbk`。设置后不再自动回退，工具的 `encoding` 参数仍可按次覆盖 |
+| `SAS_LOCAL_MCP_ENCODING_FALLBACKS` | `cp1252,latin1` | 未指定编码且默认解码失败时依次尝试的候选编码（逗号分隔，空字符串关闭回退）。默认不含 `gbk`/`gb18030`：它们会把 cp1252 的字节静默解成错误的汉字 |
 | `SAS_LOCAL_MCP_CACHE_SIZE` | `8` | 缓存多少个已解析数据集（按 mtime/size 失效）；`0` 关闭 |
 | `SAS_LOCAL_MCP_METADATA_CACHE_SIZE` | `512` | 独立的元数据缓存条目数，元数据与格式目录各另有 32 MiB 预算 |
 | `SAS_LOCAL_MCP_CACHE_MB` | `256` | 完整数据缓存预算，单位 MiB；超预算的单个数据集不保留 |
@@ -587,15 +593,15 @@ python tests/random_smoke.py --seed 20261020 --per-category 3 --out README.md
 | 工具数量 | 92 个，按 10 个 tier 选择启用 | 8 个，全部只读（无写入 / 代码执行能力） |
 | 代码组织 | `tools/` 下约 10 个模块 | 单个 `tools.py` + 核心 `dataset.py` |
 | Python 版本 | `>= 3.12` | `>= 3.11` |
-| 运行依赖 | `fastmcp`、`httpx`、`pydantic`、`uvicorn`、`anyio`、`python-dotenv` | `fastmcp`、`pandas`、`pyreadstat`、`duckdb` |
+| 运行依赖 | `fastmcp`、`httpx`、`pydantic`、`uvicorn`、`anyio`、`python-dotenv` | `fastmcp`、`pandas`、`pyreadstat`、`duckdb`、`sqlglot`、`pydantic` |
 | 统计语义层 | 无——需自行执行 SAS / SQL 取数后再推断 | `summarize_dataset` / `frequency` 直接给出缺失率、唯一值数、按类型的分布指标，并自动套用 SAS 值标签 |
 | SQL 能力 | 依赖 Viya / CAS | 内置 duckdb：仅允许单条 `SELECT`（支持 `WITH`），关闭外部文件与网络访问 |
 | 结果限流 | — | 行预览（`SAS_LOCAL_MCP_MAX_ROWS`）与聚合结果（`SAS_LOCAL_MCP_MAX_AGG_ROWS`）**分开**限流，聚合基数不被预览上限截断 |
-| 字符编码 | 由 Viya 侧决定 | `SAS_LOCAL_MCP_ENCODING`（中文数据常用 `utf-8` / `gbk`） |
+| 字符编码 | 由 Viya 侧决定 | 全局 `SAS_LOCAL_MCP_ENCODING`、每个读取工具的 `encoding` 参数，以及解码失败时的自动回退（结果里回传 `encoding_fallback`） |
 | 解析缓存 | — | 按 `(路径, mtime, size, metadata_only)` 失效的 LRU 缓存，多轮问答不重复解析大文件 |
 | 安全边界 | OAuth + Viya 侧权限体系 | 路径沙箱（越界即拒绝）+ 只读工具 + SQL 白名单 |
 | 错误处理 | — | `DatasetError` 统一转 MCP `ToolError`，返回干净消息而不崩溃进程 |
-| 格式覆盖 | — | `.sas7bcat` 仅能被 `list_datasets` 列出，pyreadstat 无对应读取器 |
+| 格式覆盖 | — | `.sas7bdat` / `.xpt` 可读；`.sas7bcat` 通过 `catalog_path` 作为外部值标签目录读取，也可被 `list_datasets` 列出 |
 | 测试数据 | — | 取自 R Consortium [submissions-pilot5](https://github.com/RConsortium/submissions-pilot5-datasetjson) 公开数据，派生为 XPORT / UTF-8 sas7bdat / GBK sas7bdat 三套（见[测试数据来源](#测试数据来源)） |
 
 ## 目录结构
@@ -609,14 +615,22 @@ sas-local-mcp/
 │   └── sas_local_mcp/
 │       ├── __init__.py
 │       ├── __main__.py     # python -m sas_local_mcp 入口
-│       ├── config.py       # 环境变量配置（数据根、两个行数上限、服务名）
+│       ├── cache.py        # 有界 LRU 缓存（字节预算 + 单次加载）
+│       ├── config.py       # 环境变量配置（数据根、行数上限、缓存与 SQL 资源、编码）
 │       ├── dataset.py      # 数据集读取 + 统计核心（pyreadstat + pandas 回退）
+│       ├── errors.py       # DatasetError 统一错误类型
+│       ├── filtering.py    # where 表达式的受限求值器（不使用 eval）
+│       ├── responses.py    # 响应字节预算与输出 schema
+│       ├── sql_labels.py   # SQL 列裁剪与标签来源分析（sqlglot）
 │       ├── stdio_server.py # FastMCP stdio 服务启动
 │       └── tools.py        # MCP 工具注册（register_tools）
 └── tests/
     ├── conftest.py         # 解析数据根（兼容根目录直放 / 分目录两种布局）
     ├── test_tools.py       # 单元测试：in-memory Client 逐个调用全部工具
     ├── test_regressions.py # 不依赖数据集的定点回归（注入 meta）
+    ├── test_bugfixes.py    # 缺陷修复回归
+    ├── test_optimizations.py # 性能与响应预算相关回归
+    ├── test_random_smoke.py  # 随机冒烟的 pytest 入口
     ├── random_smoke.py     # 随机冒烟：stdio 子进程 + 各类别大小文件抽检
     ├── sasdata/            # 测试数据：英文 sdtm / adam
     ├── sasdata_cn/         # 测试数据：中文版（编码回归）

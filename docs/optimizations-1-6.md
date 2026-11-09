@@ -94,7 +94,7 @@ SQL 仍需解析并注册源表，复杂 JOIN 和排序仍有计算成本。每�
 | `SAS_LOCAL_MCP_CACHE_SIZE` | 8 | 完整数据缓存条目数 |
 | `SAS_LOCAL_MCP_METADATA_CACHE_SIZE` | 512 | 元数据、目录及计数各自的条目数上限 |
 | `SAS_LOCAL_MCP_CACHE_MB` | 256 | 完整数据缓存的 MiB 预算 |
-| `SAS_LOCAL_MCP_CHUNK_ROWS` | 10000 | 分块过滤和 XPORT 计数的块大小 |
+| `SAS_LOCAL_MCP_CHUNK_ROWS` | 10000 | sas7bdat 分块过滤的块大小（XPORT 计数为单列一次性读取） |
 | `SAS_LOCAL_MCP_SQL_CONCURRENCY` | 2 | SQL 调用的并发数，覆盖源表读取 |
 | `SAS_LOCAL_MCP_SQL_THREADS` | 2 | 每个 DuckDB 连接的线程数 |
 | `SAS_LOCAL_MCP_SQL_MEMORY_MB` | 512 | 每个 DuckDB 连接的 MB 内存上限 |
@@ -166,7 +166,7 @@ SQL 不提供 SAS 特殊缺失值的排序或比较语义；需要区分特殊�
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-新增回归覆盖 SQL 标签冲突与表达式、局部读取、分块过滤、真实 XPORT 分块计数、SQL 有界物化、并发单次解析、缓存失效、SAS 缺失、格式目录绑定和 MCP schema。
+新增回归覆盖 SQL 标签冲突与表达式、局部读取、分块过滤、真实 XPORT 单列计数、SQL 有界物化、并发单次解析、缓存失效、SAS 缺失、格式目录绑定和 MCP schema。
 格式目录与特殊缺失使用受控读取器验证；仓库现有数据没有真实格式目录样本，因此这些测试不等于真实业务格式目录的兼容性验收。
 
 2026-11-02 本机验证记录：

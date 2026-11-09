@@ -19,6 +19,16 @@ from fastmcp import Client  # noqa: E402
 from sas_local_mcp.stdio_server import mcp  # noqa: E402
 
 MAX_FILES_TO_SCAN = 40
+ADAM_ROOT = Path(__file__).resolve().parent / "sasdata" / "adam"
+
+
+@pytest.fixture
+def adam_root(monkeypatch):
+    """SDTM 的日期都是 ISO 字符串；真正的 DATE9. 数值日期列在 ADaM，只在这两个用例里换数据根。"""
+    if not ADAM_ROOT.is_dir():
+        pytest.skip("缺少 tests/sasdata/adam 数据")
+    from sas_local_mcp import dataset
+    monkeypatch.setattr(dataset, "SAS_DATA_ROOT", ADAM_ROOT)
 
 
 async def _call(name: str, args: dict):
@@ -93,7 +103,7 @@ async def test_read_dataset_where():
     assert len(page["records"]) <= 5
 
 
-async def test_read_dataset_datetime_serialization():
+async def test_read_dataset_datetime_serialization(adam_root):
     path = await _find_file_with(lambda meta, _: any(c["type"] == "datetime" for c in meta["columns"]))
     meta = await _call("get_dataset_metadata", {"path": path})
     dt_col = next(c["name"] for c in meta["columns"] if c["type"] == "datetime")
@@ -132,7 +142,7 @@ async def test_query_dataset_rejects_multiple_or_mutating_statements(sql):
         await _call("query_dataset", {"path": "dm.sas7bdat", "sql": sql})
 
 
-async def test_query_dataset_datetime_column():
+async def test_query_dataset_datetime_column(adam_root):
     path = await _find_file_with(lambda meta, _: any(c["type"] == "datetime" for c in meta["columns"]))
     meta = await _call("get_dataset_metadata", {"path": path})
     dt_col = next(c["name"] for c in meta["columns"] if c["type"] == "datetime")

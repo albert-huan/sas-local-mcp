@@ -34,6 +34,10 @@ def referenced_columns(sql: str, tables: dict[str, list[str]],
             return None
         if isinstance(node, exp.Anonymous) and str(node.name).upper() in {"COLUMNS", "UNPACK"}:
             return None
+        # 表函数（pragma_table_info 等）与系统目录（information_schema）会读到整张表的结构，
+        # 却不会在 SQL 里点名任何列；带库名/模式名的引用同理，都按全列读取。
+        if isinstance(node, exp.Table) and (node.db or node.catalog or not isinstance(node.this, exp.Identifier)):
+            return None
         if isinstance(node, exp.Identifier):
             identifiers.add(str(node.this).lower())
         # A bare table name used as a column means a whole-row struct.

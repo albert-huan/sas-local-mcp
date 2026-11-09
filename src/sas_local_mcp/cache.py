@@ -61,9 +61,10 @@ class ReadCache:
             weight = max(0, weigh(value))
             with self._lock:
                 if generation == self._generation:
-                    # Keep only the latest file revision for this path/options.
+                    # Keep only the latest file revision of this path, whatever column subset
+                    # or options an older entry was cached under (key[1:3] = mtime_ns, size).
                     for old in list(self._items):
-                        if old[0] == key[0] and old[3:] == key[3:] and old != key:
+                        if old[0] == key[0] and old[1:3] != key[1:3]:
                             self._bytes -= self._items.pop(old)[1]
                     if weight <= max_bytes:
                         self._items[key] = (value, weight)

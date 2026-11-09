@@ -53,6 +53,28 @@ def _encoding() -> str | None:
 ENCODING: str | None = _encoding()
 
 
+def _encoding_fallbacks() -> tuple[str, ...]:
+    """未指定编码且默认解码失败时，依次尝试的候选编码；设为空字符串可关闭自动回退。
+
+    默认只含单字节编码：cp1252/latin1 对任意字节都不会解码失败，而 gbk/gb18030 会把
+    cp1252 的字节静默解成错误的汉字，所以不放进默认候选。
+    """
+    import codecs
+    raw = os.getenv("SAS_LOCAL_MCP_ENCODING_FALLBACKS")
+    names = [part.strip() for part in ("cp1252,latin1" if raw is None else raw).split(",") if part.strip()]
+    valid = []
+    for name in names:
+        try:
+            codecs.lookup(name)
+        except LookupError:
+            continue
+        valid.append(name)
+    return tuple(valid)
+
+
+ENCODING_FALLBACKS: tuple[str, ...] = _encoding_fallbacks()
+
+
 def _cache_size() -> int:
     """缓存的数据集个数（DataFrame + meta）。0 表示关闭缓存。
 
