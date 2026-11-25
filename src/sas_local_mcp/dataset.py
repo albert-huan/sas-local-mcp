@@ -32,8 +32,9 @@ from .config import (
 )
 from .cache import ReadCache
 from .errors import DatasetError
+from . import xport
 from .filtering import RowFilter
-from .sql_labels import inspect_query, referenced_columns
+from .sql_labels import inspect_query, referenced_columns, referenced_tables
 
 READABLE_SUFFIXES: dict[str, str] = {".sas7bdat": "sas7bdat", ".xpt": "xport"}
 # .sas7bcat 是格式目录文件：可被 list_datasets 发现，但没有读取器。
@@ -337,6 +338,19 @@ def _cached_full(path: Path, catalog_path: Path | None) -> tuple[pd.DataFrame, A
         return None
 
 
+def _prefer_projected_read(path: Path, columns: list[str] | None, names: list[str]) -> bool:
+    """Avoid speculative full parses for large, cold files when only a few columns are needed."""
+    if columns is None or len(columns) * 2 > len(names):
+        return False
+    try:
+        stat = path.stat()
+    except OSError:
+        return False
+    # Small files are cheap to warm as a reusable full-frame cache. For larger files,
+    # disk size is a safer cold-read signal than assuming decompressed frames fit RAM.
+    return stat.st_size > 1024 * 1024
+
+
 def _read(path: Path, metadata_only: bool, catalog_path: Path | None = None,
           columns: tuple[str, ...] | None = None) -> tuple[pd.DataFrame, Any]:
     """Separate metadata/data caches, byte budgets, file-version checks and single-flight."""
@@ -380,18 +394,21 @@ def _read_with_catalog(path: Path, metadata_only: bool, catalog_path: Path | Non
 
 def _read_data(path: Path, catalog_path: Path | None, columns: list[str] | None,
                names: list[str]) -> tuple[pd.DataFrame, Any]:
-    """Full table when it fits the cache (reusable across calls); otherwise only `columns`.
+    """Reuse a warm full frame, otherwise project narrow cold reads of larger files.
 
-    `names` is the header's column list. Projection is only worth it when the full
-    parse would not be cached anyway, so small files keep sharing one cached frame.
+    `names` is the header's column list. Small files and broad requests may still
+    warm a reusable full frame if the file is expected to fit the cache.
     """
-    wanted = [c for c in names if c in set(columns)] if columns is not None else names
+    requested = set(columns) if columns is not None else None
+    wanted = [c for c in names if c in requested] if requested is not None else names
     if (columns is None or len(wanted) == len(names) or pyreadstat is None
-            or not path.is_file() or _fits_cache(path)):
+            or not path.is_file()):
         return _read_with_catalog(path, False, catalog_path)
     cached = _cached_full(path, catalog_path)
     if cached is not None:
         return cached
+    if _fits_cache(path) and not _prefer_projected_read(path, wanted, names):
+        return _read_with_catalog(path, False, catalog_path)
     return _read(path, False, catalog_path, tuple(wanted or names[:1]))
 
 
@@ -411,6 +428,49 @@ def _slices(path: Path, catalog_path: Path | None, columns: list[str] | None = N
             break
 
 
+def _frame_slices(frame: pd.DataFrame, meta: Any):
+    """Yield bounded views of an already parsed frame, including metadata for empty input."""
+    for offset in range(0, max(1, len(frame)), CHUNK_ROWS):
+        yield frame.iloc[offset:offset + CHUNK_ROWS], meta
+
+
+def _xport_filelike_available() -> bool:
+    # The fast path relies on both file-like input and the bundled reader's
+    # observation-count and blank-row rules. Unverified versions keep legacy behavior.
+    return bool(getattr(pyreadstat, "__version__", "") == "1.3.7"
+                and hasattr(getattr(pyreadstat, "pyreadstat", None), "FileLike"))
+
+
+def _xport_layout(path, source):
+    def reader(_path, **options):
+        source.seek(0)
+        return pyreadstat.read_xport(source, **options)
+
+    frame, meta = _read_decoded(reader, path, True)
+    return xport.layout(source, frame, meta), meta
+
+
+def _xport_slices(path: Path, columns: list[str], catalog_path: Path | None):
+    try:
+        with path.open("rb") as source:
+            (start, width, end, declared), header = _xport_layout(path, source)
+            rows = xport.count_rows(source, start, width, end, declared)
+            encoding = _explicit_encoding() or encoding_fallback_of(header)
+            for window, expected in xport.windows(source, start, width, rows, declared, CHUNK_ROWS):
+                with _HEAVY_SLOTS:
+                    frame, meta = pyreadstat.read_xport(window, usecols=columns, row_limit=expected,
+                                                        encoding=encoding)
+                if len(frame) != expected:
+                    raise xport.XportFallback
+                if encoding_fallback_of(header):
+                    meta.encoding_fallback = header.encoding_fallback
+                yield _attach_catalog((frame, meta), catalog_path)
+    except (TypeError, ValueError, OSError, pyreadstat.ReadstatError, pyreadstat.PyreadstatError) as exc:
+        # Retry the original full reader from the beginning; do not mix encodings
+        # within a result if a later batch requires the existing fallback policy.
+        raise xport.XportFallback from exc
+
+
 def _exact_row_count(path: Path, df: pd.DataFrame, meta: Any, catalog_path: Path | None) -> int:
     count = _row_count(df, meta)
     if count is not None:
@@ -421,13 +481,22 @@ def _exact_row_count(path: Path, df: pd.DataFrame, meta: Any, catalog_path: Path
         cached = _cached_full(path, catalog_path)
         if cached is not None:
             return len(cached[0])
-        # pyreadstat 的 XPORT row_offset 每次从头扫描，分块计数是 O(n²)；
-        # 单列一次性读取是线性的，内存也只有一列。
         revision = _cache_key(path, False, catalog_path)
-        frame, _ = _read_uncached(path, False, usecols=list(df.columns[:1]))
+        rows = None
+        if dataset_format(path) == "xport" and _xport_filelike_available():
+            try:
+                with path.open("rb") as source:
+                    bounds, _ = _xport_layout(path, source)
+                    rows = xport.count_rows(source, *bounds)
+            except (xport.XportFallback, TypeError, ValueError, OSError,
+                    pyreadstat.ReadstatError, pyreadstat.PyreadstatError):
+                pass
+        if rows is None:
+            frame, _ = _read_uncached(path, False, usecols=list(df.columns[:1]))
+            rows = len(frame)
         if revision != _cache_key(path, False, catalog_path):
             raise DatasetError(f"读取期间文件发生变化: {path.name}，请重试", "FILE_CHANGED")
-        return len(frame)
+        return rows
     return _COUNT_CACHE.get_or_load(
         _cache_key(path, True, catalog_path), count_rows,
         capacity=METADATA_CACHE_SIZE if CACHE_SIZE else 0, max_bytes=1024 * 1024, weigh=lambda _: 8,
@@ -695,7 +764,19 @@ def read_metadata(path: Path, *, catalog_path: Path | None = None, include_row_c
     }
 
 
+def _retry_xport_stream(fn):
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except xport.XportFallback:
+            kwargs["_stream_xport"] = False
+            return fn(*args, **kwargs)
+    return wrapped
+
+
 @_with_encoding
+@_retry_xport_stream
 def read_rows(
     path: Path,
     *,
@@ -707,6 +788,7 @@ def read_rows(
     catalog_path: Path | None = None,
     include_row_count: bool = True,
     missing_policy: str = "sas",
+    _stream_xport: bool = True,
 ) -> dict[str, Any]:
     """Read only a requested page; filter chunks before projecting output columns."""
     actual_file = pyreadstat is not None and path.is_file()
@@ -743,12 +825,14 @@ def read_rows(
         needed = list(dict.fromkeys(selected + sorted(predicate.columns if predicate else [])))
         cached = _cached_full(path, catalog_path) if actual_file else None
         if cached is not None:
-            chunks = [cached]
+            chunks = _frame_slices(*cached)
         elif actual_file and dataset_format(path) == "xport":
-            # pyreadstat 的 XPORT row_offset 每次从文件头扫描，分块过滤是 O(n²)；
-            # 改为一次读取（能进缓存就整表，否则只读所需列）。
-            with _HEAVY_SLOTS:
-                chunks = [_read_data(path, catalog_path, needed, names)]
+            if _stream_xport and _xport_filelike_available():
+                chunks = _xport_slices(path, needed, catalog_path)
+            else:
+                # Repeated row_offset calls would re-scan each prefix.
+                with _HEAVY_SLOTS:
+                    chunks = _frame_slices(*_read_data(path, catalog_path, needed, names))
         elif actual_file:
             chunks = _slices(path, catalog_path, needed)
         else:
@@ -766,21 +850,29 @@ def read_rows(
                 if encoding_fallback_of(chunk_meta):
                     meta.encoding_fallback = chunk_meta.encoding_fallback
             scanned += len(chunk)
+            positions = None
+            chunk_matches = len(chunk)
             if predicate:
-                filter_data = chunk.copy()
+                condition_data = {}
                 for name in predicate.columns:
-                    mask = _missing_mask(filter_data[name], chunk_meta, name, missing_policy)
-                    filter_data[name] = filter_data[name].mask(mask)
-                    if _column_type(chunk_meta, name, chunk[name].dtype) == "numeric":
-                        filter_data[name] = pd.to_numeric(filter_data[name], errors="coerce")
-                chunk = chunk.loc[predicate.apply(filter_data)]
+                    series = chunk[name]
+                    clean = series.mask(_missing_mask(series, chunk_meta, name, missing_policy))
+                    if _column_type(chunk_meta, name, series.dtype) == "numeric":
+                        clean = pd.to_numeric(clean, errors="coerce")
+                    condition_data[name] = clean
+                filter_data = pd.DataFrame(condition_data, index=chunk.index, copy=False)
+                positions = predicate.apply(filter_data).to_numpy(dtype=bool).nonzero()[0]
+                chunk_matches = len(positions)
             local_start = max(0, start - matched)
             local_stop = max(0, start + effective + 1 - matched)
-            if local_start < len(chunk) and local_stop > local_start:
-                pages.append(chunk.iloc[local_start:local_stop][selected])
-            matched += len(chunk)
+            if local_start < chunk_matches and local_stop > local_start:
+                indexes = slice(local_start, local_stop) if positions is None else positions[local_start:local_stop]
+                pages.append(chunk.iloc[indexes][selected])
+            matched += chunk_matches
             if not include_row_count and matched > start + effective:
                 exhausted = False
+                if hasattr(chunks, "close"):
+                    chunks.close()
                 break
         page = pd.concat(pages, ignore_index=True) if pages else df[selected].iloc[:0]
         more = len(page) > effective
@@ -946,19 +1038,27 @@ def _query_dataset(path, sql, limit, offset, extra_paths, apply_labels,
         raise DatasetError(f"catalog_paths 含未知表名: {sorted(set(catalog_paths) - used)}", "INVALID_CATALOG")
 
     # 先读表头（走元数据缓存），据此只加载 SQL 实际引用的列。
-    table_columns = {name: [str(c) for c in _read_with_catalog(source, True, catalog_paths.get(name))[0].columns]
-                     for name, source in sources_by_name}
+    table_columns: dict[str, list[str]] = {}
+    metas: dict[str, Any] = {}
+    for name, source in sources_by_name:
+        header, metas[name] = _read_with_catalog(source, True, catalog_paths.get(name))
+        table_columns[name] = [str(c) for c in header.columns]
     explicit = {str(v) for origin in (label_sources or {}).values() for v in origin.values()}
     needed = referenced_columns(executable, table_columns, explicit | set(label_sources or {}))
+    referenced = referenced_tables(executable, used) if extra_paths else None
+    if referenced is not None:
+        # The primary table and explicit label sources retain their existing behavior.
+        referenced.add("dataset")
+        referenced.update(str(origin.get("table")) for origin in (label_sources or {}).values())
 
-    metas: dict[str, Any] = {}
-    # (表名, DataFrame, 原始路径)
-    frames: list[tuple[str, pd.DataFrame, Path]] = []
+    frames: dict[str, pd.DataFrame] = {}
     for name, source in sources_by_name:
+        if referenced is not None and name not in referenced:
+            continue
         frame, meta = _read_data(source, catalog_paths.get(name),
                                  needed.get(name) if needed else None, table_columns[name])
         metas[name] = meta
-        frames.append((name, frame, source))
+        frames[name] = frame
     automatic_sources, ordered = inspect_query(executable, table_columns)
     effective = max(1, min(int(limit), MAX_AGG_ROWS))
     start = max(0, int(offset))
@@ -968,7 +1068,7 @@ def _query_dataset(path, sql, limit, offset, extra_paths, apply_labels,
     try:
         con = duckdb.connect(config={"enable_external_access": "false", "memory_limit": f"{SQL_MEMORY_MB}MB",
                                      "threads": str(SQL_THREADS), "max_temp_directory_size": "0B"})
-        for name, frame, _ in frames:
+        for name, frame in frames.items():
             con.register(name, _sql_frame(frame, metas[name], missing_policy))
         relation = con.sql(executable)
         # Fetch at most a page and a sentinel; no full result DataFrame is created.
@@ -986,7 +1086,7 @@ def _query_dataset(path, sql, limit, offset, extra_paths, apply_labels,
         raise DatasetError(f"SQL 执行失败: {exc}", code) from exc
     finally:
         if con is not None:
-            for name, _, _ in frames:
+            for name in frames:
                 with contextlib.suppress(Exception):
                     con.unregister(name)
             con.close()
@@ -1028,7 +1128,7 @@ def _query_dataset(path, sql, limit, offset, extra_paths, apply_labels,
     return _DecodedPage({
         "path": _rel(path),
         "sql": sql,
-        "tables": {name: _rel(frame_path) for name, _, frame_path in frames},
+        "tables": {name: _rel(source) for name, source in sources_by_name},
         "total_rows": total_rows,
         "row_count_exact": include_total,
         "offset": start,

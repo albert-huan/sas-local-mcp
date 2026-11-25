@@ -280,7 +280,7 @@ async def test_frequency_include_missing_changes_denominator():
     assert with_missing["denominator"] == LB_ROWS
 
 
-async def test_frequency_value_labels_and_missing_bucket(monkeypatch):
+async def test_frequency_value_labels_and_missing_bucket(monkeypatch, tmp_path):
     """真实测试数据无值标签，注入 meta 覆盖解码与缺失分档这两条分支。"""
     import types
 
@@ -293,7 +293,9 @@ async def test_frequency_value_labels_and_missing_bucket(monkeypatch):
         column_labels=["治疗组", "性别"],
         variable_value_labels={"ARMN": {1.0: "Placebo", 2.0: "Low", 3.0: "High"}},
     )
-    monkeypatch.setattr(ds, "SAS_DATA_ROOT", WORKSPACE_ROOT)
+    # Keep the fake reader isolated from real frames cached by other tool tests.
+    (tmp_path / "dm.sas7bdat").touch()
+    monkeypatch.setattr(ds, "SAS_DATA_ROOT", tmp_path)
     monkeypatch.setattr(ds, "_read", lambda _path, metadata_only=False: (frame, meta))
 
     labelled = await _call("frequency", {"path": "dm.sas7bdat", "column": "ARMN"})

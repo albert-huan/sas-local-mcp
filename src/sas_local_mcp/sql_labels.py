@@ -8,6 +8,35 @@ _EXPANDING = tuple(getattr(exp, name) for name in ("Pivot", "Columns", "Position
                    if hasattr(exp, name))
 
 
+def referenced_tables(sql: str, names: set[str]) -> set[str] | None:
+    """Return sources for a flat SELECT over known tables; otherwise keep all sources."""
+    try:
+        tree = parse_one(sql, read="duckdb")
+    except (SqlglotError, RecursionError):
+        return None
+    if not isinstance(tree, exp.Select) or tree.args.get("with_") or tree.args.get("with"):
+        return None
+    if any(node is not tree and isinstance(node, exp.Query) for node in tree.walk()):
+        return None
+
+    known = {name.lower(): name for name in names}
+    source = tree.args.get("from_") or tree.args.get("from")
+    relations = ([source.this] if source is not None else []) + [join.this for join in tree.args.get("joins", [])]
+    direct = {id(relation) for relation in relations}
+    if any(id(table) not in direct for table in tree.find_all(exp.Table)):
+        return None
+    used = set()
+    for relation in relations:
+        if (not isinstance(relation, exp.Table) or not isinstance(relation.this, exp.Identifier)
+                or relation.db or relation.catalog or relation.args.get("pivots")):
+            return None
+        name = known.get(relation.name.lower())
+        if name is None:
+            return None
+        used.add(name)
+    return used
+
+
 def referenced_columns(sql: str, tables: dict[str, list[str]],
                        extra: set[str] = frozenset()) -> dict[str, list[str]] | None:
     """Columns each registered table must supply, or None when that cannot be proven.

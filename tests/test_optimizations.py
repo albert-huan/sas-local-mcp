@@ -51,6 +51,46 @@ def test_sql_decoding_tracks_aliases_and_source_tables(monkeypatch):
     assert result["label_decoding"]["treatment"]["values_decoded"] == 2
 
 
+@pytest.mark.parametrize(("sql", "extras_read", "expected"), [
+    ("SELECT count(*) AS n FROM dataset", [], {"n": 2}),
+    ('SELECT count(*) AS n FROM "LB"', ["lb"], {"n": 2}),
+    ("SELECT count(*) AS n FROM dataset JOIN lb USING (ARM)", ["lb"], {"n": 2}),
+    ("SELECT count(*) AS n FROM pragma_table_info('lb')", ["lb", "unused"], {"n": 1}),
+    ("WITH c AS (SELECT * FROM lb) SELECT count(*) AS n FROM c", ["lb", "unused"], {"n": 2}),
+])
+def test_sql_skips_only_provably_unused_extra_frames(monkeypatch, sql, extras_read, expected):
+    path = labelled_sources(monkeypatch)
+    reader = ds._read
+    calls = []
+
+    def spy(source, metadata_only=False):
+        calls.append((source.stem, metadata_only))
+        return reader(source, metadata_only)
+
+    monkeypatch.setattr(ds, "_read", spy)
+    result = ds.query_dataset(path, sql, extra_paths=[Path("lb.sas7bdat"), Path("unused.sas7bdat")])
+
+    assert result["records"] == [expected]
+    assert set(result["tables"]) == {"dataset", "lb", "unused"}
+    assert [name for name, metadata in calls if metadata] == ["main", "lb", "unused"]
+    assert [name for name, metadata in calls if not metadata] == ["main", *extras_read]
+
+
+def test_sql_keeps_explicit_label_source_outside_from_clause(monkeypatch):
+    path = labelled_sources(monkeypatch)
+
+    def get_extra_data(source, catalog_path, columns, names):
+        frame, meta = ds._read(source)
+        if source.stem == "lb":
+            meta.variable_value_labels = {"ARM": {1.0: "Low"}}
+        return frame, meta
+
+    monkeypatch.setattr(ds, "_read_data", get_extra_data)
+    result = ds.query_dataset(path, "SELECT 1 AS dose", extra_paths=[Path("lb.sas7bdat")],
+                              apply_labels=True, label_sources={"dose": {"table": "lb", "column": "ARM"}})
+    assert result["records"] == [{"dose": "Low"}]
+
+
 @pytest.mark.parametrize("sql", ["SELECT SUM(ARM) - 1 AS ARM FROM dataset", "WITH x AS (SELECT ARM FROM dataset) SELECT ARM FROM x"])
 def test_sql_expressions_and_nested_scopes_do_not_guess_labels(monkeypatch, sql):
     path = labelled_sources(monkeypatch)
@@ -172,6 +212,60 @@ def test_xport_counts_stream_without_caching_a_full_frame(monkeypatch, tmp_path)
     page = ds.read_rows(path, columns=["ID"], offset=10, limit=2)
     assert page["records"] == [{"ID": 10.0}, {"ID": 11.0}]
     assert page["total_rows"] == 13 and page["truncated"]
+
+
+@pytest.mark.parametrize(("count", "offset", "values", "scanned", "total", "matches"), [
+    (False, 1, [3.0, 5.0], [4, 4], None, None),
+    (True, 1, [3.0, 5.0], [4, 4, 4, 4, 3], 19, 9),
+    (False, 8, [17.0], [4, 4, 4, 4, 3], 19, 9),
+])
+@pytest.mark.parametrize("version", [5, 8])
+@pytest.mark.skipif(not ds._xport_filelike_available(), reason="pyreadstat does not support file-like sources")
+def test_xport_filtered_page_decodes_only_necessary_windows(monkeypatch, tmp_path, count, offset,
+                                                            values, scanned, total, matches, version):
+    path = tmp_path / "sample.xpt"
+    pyreadstat.write_xport(pd.DataFrame({"ID": range(19), "FLAG": [i % 2 for i in range(19)]}), path,
+                           file_format_version=version)
+    monkeypatch.setattr(ds, "CHUNK_ROWS", 4)
+    data_reads, batch_sizes = [], []
+    read_xport, apply_filter = pyreadstat.read_xport, ds.RowFilter.apply
+
+    def read(*args, metadataonly=False, **options):
+        if not metadataonly:
+            assert hasattr(args[0], "read")
+            data_reads.append(options)
+        return read_xport(*args, metadataonly=metadataonly, **options)
+
+    def apply(self, batch):
+        assert batch.columns.tolist() == ["FLAG"]
+        batch_sizes.append(len(batch))
+        return apply_filter(self, batch)
+
+    monkeypatch.setattr(pyreadstat, "read_xport", read)
+    monkeypatch.setattr(ds.RowFilter, "apply", apply)
+    page = ds.read_rows(path, columns=["ID"], where="FLAG == 1", offset=offset, limit=2,
+                        include_row_count=count)
+
+    assert [opts["row_limit"] for opts in data_reads] == scanned
+    assert all("row_offset" not in opts for opts in data_reads)
+    assert batch_sizes == scanned
+    assert page["records"] == [{"ID": value} for value in values]
+    assert (page["total_rows"], page["rows_after_filter"]) == (total, matches)
+    assert page["next_offset"] == (3 if offset == 1 else None)
+
+
+@pytest.mark.skipif(not ds._xport_filelike_available(), reason="pyreadstat does not support file-like sources")
+@pytest.mark.parametrize(("version", "width", "rows"), [(5, 1, 4), (8, 1, 5), (5, 80, 4)])
+def test_xport_distinguishes_blank_rows_from_padding(monkeypatch, tmp_path, version, width, rows):
+    path = tmp_path / "blank.xpt"
+    pyreadstat.write_xport(pd.DataFrame({"TXT": ["a" * width, " ", " ", "b", " "]}), path,
+                           file_format_version=version)
+    monkeypatch.setattr(ds, "CHUNK_ROWS", 2)
+    baseline = pyreadstat.read_xport(path)[0]["TXT"].tolist()
+
+    assert ds.read_metadata(path)["number_rows"] == len(baseline) == rows
+    page = ds.read_rows(path, where="True", limit=10)
+    assert [row["TXT"] for row in page["records"]] == baseline
 
 
 def test_sql_materializes_only_page_and_count_is_optional(monkeypatch):

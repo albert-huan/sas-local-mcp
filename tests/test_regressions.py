@@ -223,32 +223,33 @@ def oversize_setup(monkeypatch):
 
 
 @pytest.mark.skipif(not ADADAS.exists(), reason="缺少 adadas.sas7bdat")
-def test_oversize_full_parse_is_remembered_and_later_reads_prune_columns(oversize_setup):
+def test_narrow_cold_reads_prune_columns_before_an_oversize_full_parse(oversize_setup):
     reads = oversize_setup
     assert ds._fits_cache(ADADAS) is True  # 只看磁盘体积时的初始猜测
 
     first = ds.frequency(ADADAS, "TRTP")
-    assert reads == [None]  # 第一次：猜错了，读了全部列
-    assert ds._fits_cache(ADADAS) is False  # 实测超预算后被记住
-
     second = ds.frequency(ADADAS, "SITEID")
-    assert reads == [None, ["SITEID"]]  # 之后只读需要的列，不再整表重读
     third = ds.frequency(ADADAS, "TRTP")
-    assert reads[-1] == ["TRTP"]
+    assert reads == [["TRTP"], ["SITEID"]]  # 首次就按列读取，重复请求命中投影缓存
     assert first["levels"] == third["levels"] and second["total_rows"] == first["total_rows"]
+
+    ds.query_dataset(ADADAS, "SELECT * FROM dataset", limit=1)
+    assert reads[-1] is None  # 显式全列请求仍要解析整表
+    assert ds._fits_cache(ADADAS) is False  # 实测超预算后被记住
 
 
 @pytest.mark.skipif(not ADADAS.exists(), reason="缺少 adadas.sas7bdat")
-def test_fitting_file_keeps_sharing_one_cached_frame(monkeypatch):
+def test_narrow_reads_reuse_an_already_warm_full_frame(monkeypatch):
     monkeypatch.setattr(ds, "CACHE_MAX_BYTES", 64 * 1024 * 1024)
     ds.clear_caches()
     reads = []
     real = ds._read_uncached
     monkeypatch.setattr(ds, "_read_uncached", lambda path, md, cp=None, **o: (reads.append(o.get("usecols")) if not md else None, real(path, md, cp, **o))[1])
     try:
+        ds.query_dataset(ADADAS, "SELECT * FROM dataset", limit=1)
         ds.frequency(ADADAS, "TRTP")
         ds.frequency(ADADAS, "SITEID")
-        assert reads == [None]  # 放得下：整表只解析一次，第二次命中缓存
+        assert reads == [None]  # 宽查询预热后，两次窄查询均复用整表
         assert ds._fits_cache(ADADAS) is True
     finally:
         ds.clear_caches()

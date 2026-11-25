@@ -131,8 +131,9 @@ def _count_reads(monkeypatch):
     return calls
 
 
-def test_xport_filter_reads_once_and_reuses_cache(monkeypatch, tmp_path):
+def test_legacy_xport_filter_reads_once_and_reuses_cache(monkeypatch, tmp_path):
     path = _xport(tmp_path)
+    monkeypatch.setattr(ds, "_xport_filelike_available", lambda: False)
     monkeypatch.setattr(ds, "CHUNK_ROWS", 4)
     calls = _count_reads(monkeypatch)
     result = ds.read_rows(path, where="ID >= 10", limit=2)
@@ -144,13 +145,18 @@ def test_xport_filter_reads_once_and_reuses_cache(monkeypatch, tmp_path):
     assert not [1 for metadata, _ in calls if not metadata], "缓存的整表应被过滤复用"
 
 
-def test_xport_count_is_single_column_single_pass(monkeypatch, tmp_path):
+def test_xport_count_does_not_decode_values(monkeypatch, tmp_path):
+    if not ds._xport_filelike_available():
+        pytest.skip("pyreadstat does not support file-like sources")
     path = _xport(tmp_path)
-    monkeypatch.setattr(ds, "CHUNK_ROWS", 4)
-    calls = _count_reads(monkeypatch)
+    reader = pyreadstat.read_xport
+
+    def header_only(*args, metadataonly=False, **options):
+        assert metadataonly
+        return reader(*args, metadataonly=metadataonly, **options)
+
+    monkeypatch.setattr(pyreadstat, "read_xport", header_only)
     assert ds.read_metadata(path)["number_rows"] == 13
-    data = [kwargs for metadata, kwargs in calls if not metadata]
-    assert len(data) == 1 and data[0]["usecols"] == ["ID"]
     assert len(ds._CACHE) == 0
 
 
